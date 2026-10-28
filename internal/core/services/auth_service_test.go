@@ -405,7 +405,7 @@ func TestRefreshRotacion(t *testing.T) {
 	env := newEnv()
 	pair := mustLogin(t, env)
 
-	newPair, err := env.svc.Refresh(context.Background(), pair.RefreshToken)
+	newPair, err := env.svc.Refresh(context.Background(), pair.RefreshToken, testClaims())
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -428,11 +428,11 @@ func TestRefreshReusoRevocaFamilia(t *testing.T) {
 	env := newEnv()
 	pair := mustLogin(t, env)
 
-	if _, err := env.svc.Refresh(context.Background(), pair.RefreshToken); err != nil {
+	if _, err := env.svc.Refresh(context.Background(), pair.RefreshToken, testClaims()); err != nil {
 		t.Fatalf("primer refresh: %v", err)
 	}
 	// Reintento con el token viejo (posible robo).
-	_, err := env.svc.Refresh(context.Background(), pair.RefreshToken)
+	_, err := env.svc.Refresh(context.Background(), pair.RefreshToken, testClaims())
 	if !errors.Is(err, domain.ErrRefreshReuse) {
 		t.Fatalf("esperaba ErrRefreshReuse, obtuve %v", err)
 	}
@@ -449,7 +449,7 @@ func TestRefreshCarreraRevocaFamilia(t *testing.T) {
 
 	// Entre la lectura del token y su revocación, otra petición lo rotó.
 	env.tokens.forceZeroRows = true
-	_, err := env.svc.Refresh(context.Background(), pair.RefreshToken)
+	_, err := env.svc.Refresh(context.Background(), pair.RefreshToken, testClaims())
 	if !errors.Is(err, domain.ErrRefreshReuse) {
 		t.Fatalf("esperaba ErrRefreshReuse por carrera, obtuve %v", err)
 	}
@@ -460,7 +460,7 @@ func TestRefreshCarreraRevocaFamilia(t *testing.T) {
 
 func TestRefreshTokenInexistente(t *testing.T) {
 	env := newEnv()
-	_, err := env.svc.Refresh(context.Background(), "basura")
+	_, err := env.svc.Refresh(context.Background(), "basura", testClaims())
 	if !errors.Is(err, domain.ErrInvalidRefresh) {
 		t.Errorf("esperaba ErrInvalidRefresh, obtuve %v", err)
 	}
@@ -475,8 +475,64 @@ func TestRefreshExpirado(t *testing.T) {
 	tok.ExpiresAt = time.Now().Add(-time.Minute)
 	env.tokens.byHash[h] = tok
 
-	if _, err := env.svc.Refresh(context.Background(), pair.RefreshToken); !errors.Is(err, domain.ErrInvalidRefresh) {
+	if _, err := env.svc.Refresh(context.Background(), pair.RefreshToken, testClaims()); !errors.Is(err, domain.ErrInvalidRefresh) {
 		t.Errorf("esperaba ErrInvalidRefresh con token expirado, obtuve %v", err)
+	}
+}
+
+func TestRefreshRevocaAccessAnterior(t *testing.T) {
+	env := newEnv()
+	pair := mustLogin(t, env)
+	old := testClaims()
+
+	if _, err := env.svc.Refresh(context.Background(), pair.RefreshToken, old); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if !env.rev.revokedJTI[uuid.MustParse(old.JTI)] {
+		t.Error("el access token anterior debe quedar en la denylist")
+	}
+}
+
+func TestRefreshAccessExpiradoNoVaALaDenylist(t *testing.T) {
+	env := newEnv()
+	pair := mustLogin(t, env)
+	old := testClaims()
+	old.ExpiresAt = time.Now().Add(-time.Minute)
+
+	if _, err := env.svc.Refresh(context.Background(), pair.RefreshToken, old); err != nil {
+		t.Fatalf("Refresh con access expirado: %v", err)
+	}
+	if len(env.rev.revokedJTI) != 0 {
+		t.Error("un access ya expirado no necesita denylist")
+	}
+}
+
+func TestRefreshSinAccessAnterior(t *testing.T) {
+	env := newEnv()
+	pair := mustLogin(t, env)
+
+	if _, err := env.svc.Refresh(context.Background(), pair.RefreshToken, nil); !errors.Is(err, domain.ErrInvalidRefresh) {
+		t.Fatalf("esperaba ErrInvalidRefresh sin access, obtuve %v", err)
+	}
+	if env.tokens.byHash[hashToken(pair.RefreshToken)].Revoked {
+		t.Error("sin access no debe gastarse el refresh token")
+	}
+}
+
+func TestRefreshAccessDeOtroUsuario(t *testing.T) {
+	env := newEnv()
+	pair := mustLogin(t, env)
+	other := testClaims()
+	other.UserID = uuid.New()
+
+	if _, err := env.svc.Refresh(context.Background(), pair.RefreshToken, other); !errors.Is(err, domain.ErrInvalidRefresh) {
+		t.Fatalf("esperaba ErrInvalidRefresh, obtuve %v", err)
+	}
+	if env.tokens.byHash[hashToken(pair.RefreshToken)].Revoked {
+		t.Error("con un access ajeno no debe gastarse el refresh token")
+	}
+	if len(env.rev.revokedJTI) != 0 {
+		t.Error("no debe revocarse el access de otro usuario")
 	}
 }
 

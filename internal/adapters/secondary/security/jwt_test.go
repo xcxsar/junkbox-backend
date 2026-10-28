@@ -101,3 +101,33 @@ func TestSeedHashCorrespondeAPassword123(t *testing.T) {
 		t.Errorf("el hash del seed no corresponde a Password123!: %v", err)
 	}
 }
+
+func TestParseAccessAllowExpiredAceptaVencido(t *testing.T) {
+	m := NewJWTManager(testSecret, -time.Minute)
+	userID := uuid.New()
+	token, err := m.GenerateAccess(userID, "a")
+	if err != nil {
+		t.Fatalf("GenerateAccess: %v", err)
+	}
+	parsed, err := m.ParseAccessAllowExpired(token)
+	if err != nil {
+		t.Fatalf("ParseAccessAllowExpired: %v", err)
+	}
+	if parsed.UserID != userID || parsed.JTI == "" {
+		t.Errorf("claims inesperados: %+v", parsed)
+	}
+}
+
+func TestParseAccessAllowExpiredRechazaFirmaInvalida(t *testing.T) {
+	m := NewJWTManager(testSecret, -time.Minute)
+	other := NewJWTManager(strings.Repeat("f", 32), time.Minute)
+	token, _ := m.GenerateAccess(uuid.New(), "a")
+	if _, err := other.ParseAccessAllowExpired(token); !errors.Is(err, ErrInvalidToken) {
+		t.Errorf("esperaba ErrInvalidToken con otro secreto, obtuve %v", err)
+	}
+	for _, tok := range []string{"", "abc", "eyJhbGciOiJub25lIn0.e30."} {
+		if _, err := m.ParseAccessAllowExpired(tok); !errors.Is(err, ErrInvalidToken) {
+			t.Errorf("token %q: esperaba ErrInvalidToken, obtuve %v", tok, err)
+		}
+	}
+}

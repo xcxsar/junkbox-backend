@@ -279,7 +279,7 @@ Base: `http://localhost:8080/api/v1`
 | `GET` | `/healthz` (sin prefijo) | — | Healthcheck (`200 ok`) |
 | `POST` | `/auth/register` | — | Registro (`username`, `email`, `password`, `display_name?`, `avatar_url?`) → `201` + tokens + perfil |
 | `POST` | `/auth/login` | — | Login con `identifier` (email o username) y `password` → tokens + perfil |
-| `POST` | `/auth/refresh` | — | Rota el `refresh_token`; reusar uno viejo revoca toda la sesión |
+| `POST` | `/auth/refresh` | Bearer (puede estar expirado) | Rota el `refresh_token` a cambio del access token anterior, que queda revocado; reusar un refresh viejo revoca toda la sesión |
 | `GET` | `/auth/me` | Bearer | Perfil del usuario autenticado |
 | `POST` | `/auth/logout` | Bearer | Revoca el access token actual y el `refresh_token`; con `all_sessions: true` cierra todas las sesiones |
 

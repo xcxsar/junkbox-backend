@@ -16,11 +16,28 @@ import (
 // AuthHandler expone los endpoints de autenticación.
 type AuthHandler struct {
 	auth *services.AuthService
+	// previousAccess valida el access token anterior en /auth/refresh
+	// tolerando que haya expirado.
+	previousAccess middleware.JWTValidator
+}
+
+// ExpiredAccessParser parsea Access Tokens verificando la firma pero
+// tolerando un exp vencido. Lo implementa *security.JWTManager.
+type ExpiredAccessParser interface {
+	ParseAccessAllowExpired(token string) (*domain.AccessClaims, error)
+}
+
+// expiredAccessValidator adapta ExpiredAccessParser a JWTValidator para
+// reutilizar middleware.ClaimsFromRequest.
+type expiredAccessValidator struct{ p ExpiredAccessParser }
+
+func (v expiredAccessValidator) ParseAccess(token string) (*domain.AccessClaims, error) {
+	return v.p.ParseAccessAllowExpired(token)
 }
 
 // NewAuthHandler crea el handler.
-func NewAuthHandler(auth *services.AuthService) *AuthHandler {
-	return &AuthHandler{auth: auth}
+func NewAuthHandler(auth *services.AuthService, jwt ExpiredAccessParser) *AuthHandler {
+	return &AuthHandler{auth: auth, previousAccess: expiredAccessValidator{jwt}}
 }
 
 // Register: POST /api/v1/auth/register
@@ -67,8 +84,15 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, authResponse(pair, profile))
 }
 
-// Refresh: POST /api/v1/auth/refresh
+// Refresh: POST /api/v1/auth/refresh. Exige el access token anterior en
+// `Authorization: Bearer` (puede estar expirado): sin la llave vieja no se
+// entrega una nueva.
 func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
+	claims, err := middleware.ClaimsFromRequest(r, h.previousAccess)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "no autorizado")
+		return
+	}
 	var req dto.RefreshRequest
 	if err := decodeBody(w, r, &req); err != nil {
 		return
@@ -78,7 +102,7 @@ func (h *AuthHandler) Refresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	pair, err := h.auth.Refresh(r.Context(), req.RefreshToken)
+	pair, err := h.auth.Refresh(r.Context(), req.RefreshToken, claims)
 	if err != nil {
 		writeServiceError(w, err)
 		return

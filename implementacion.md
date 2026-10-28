@@ -882,7 +882,7 @@ Errores de dominio (`internal/core/domain/user.go`): `ErrInvalidCredentials`, `E
 - `services/auth_service_test.go`: usa fakes en memoria de los stores, del hasher y del JWT. Cubre:
   - register: OK, opcionales vacíos, duplicado, carrera `23505` y validaciones;
   - login: por username y por email, usuario inexistente y contraseña incorrecta;
-  - refresh: rotación con `replaced_by` y misma familia, reuso, carrera, token inexistente y expirado;
+  - refresh: rotación con `replaced_by` y misma familia, reuso, carrera, token inexistente y expirado, revocación del access anterior, access ausente o de otro usuario;
   - logout: idempotente, denylist y `all_sessions`;
   - me: OK y usuario borrado.
 - `security/jwt_test.go`: ida y vuelta de claims, `jti` único, token expirado, secreto distinto, tokens basura o `alg=none`, el hasher y la verificación del hash del seed.
@@ -953,11 +953,12 @@ _Respuesta esperada: `200 OK` con `id`, `username`, `email`, `display_name`, `av
 REFRESH_TOKEN="<pegar_refresh_token_aqui>"
 
 curl -i -X POST http://localhost:8080/api/v1/auth/refresh \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{ \"refresh_token\": \"$REFRESH_TOKEN\" }"
 ```
 
-_Respuesta esperada: `200 OK` con nuevo par de tokens. Si se reintenta enviar el refresh token viejo, debe responder `401 Unauthorized` (`refresh token reutilizado; sesión revocada`). Al revocarse toda la familia, el refresh token **nuevo** también queda inválido y hay que volver a hacer login._
+_Respuesta esperada: `200 OK` con nuevo par de tokens. El access token enviado (la llave vieja, aunque haya expirado) queda revocado: usarlo en `/auth/me` responde `401`. Sin cabecera `Authorization`, o con un access de otro usuario, responde `401` y el refresh token no se gasta. Si se reintenta enviar el refresh token viejo, debe responder `401 Unauthorized` (`refresh token reutilizado; sesión revocada`). Al revocarse toda la familia, el refresh token **nuevo** también queda inválido y hay que volver a hacer login._
 
 ---
 

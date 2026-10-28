@@ -86,6 +86,37 @@ func (m *JWTManager) ParseAccess(tokenStr string) (*domain.AccessClaims, error) 
 		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
 	}
 
+	return toDomainClaims(&claims)
+}
+
+// ParseAccessAllowExpired valida firma, método y emisor igual que
+// ParseAccess, pero tolera un exp vencido. Lo usa /auth/refresh: para
+// recibir una llave nueva hay que entregar la vieja, que normalmente ya
+// expiró.
+func (m *JWTManager) ParseAccessAllowExpired(tokenStr string) (*domain.AccessClaims, error) {
+	var claims accessClaims
+	_, err := jwt.ParseWithClaims(tokenStr, &claims, func(t *jwt.Token) (interface{}, error) {
+		return m.secret, nil
+	},
+		jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+		// Sin validación de claims (exp): la firma sí se verifica. El
+		// emisor y la presencia de exp se comprueban a mano.
+		jwt.WithoutClaimsValidation(),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalidToken, err)
+	}
+	if claims.Issuer != m.issuer {
+		return nil, fmt.Errorf("%w: emisor inválido", ErrInvalidToken)
+	}
+	if claims.ExpiresAt == nil {
+		return nil, fmt.Errorf("%w: falta exp", ErrInvalidToken)
+	}
+	return toDomainClaims(&claims)
+}
+
+// toDomainClaims valida sub, jti e iat y convierte a claims del dominio.
+func toDomainClaims(claims *accessClaims) (*domain.AccessClaims, error) {
 	userID, err := uuid.Parse(claims.Subject)
 	if err != nil {
 		return nil, fmt.Errorf("%w: sub no es un UUID", ErrInvalidToken)

@@ -69,7 +69,7 @@ func runServer(cmd *cobra.Command) {
 
 	// 5. Router y servidor HTTP con shutdown elegante.
 	handler := httpapi.NewRouter(httpapi.RouterOptions{
-		Auth:       httpapi.NewAuthHandler(authSvc),
+		Auth:       httpapi.NewAuthHandler(authSvc, jwtManager),
 		JWT:        jwtManager,
 		Revocation: revocationChecker,
 	})

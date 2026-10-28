@@ -160,11 +160,21 @@ func (s *AuthService) Login(ctx context.Context, identifier, password string) (*
 	return &pair.TokenPair, &profile, nil
 }
 
-// Refresh rota un refresh token vigente. Si el token ya estaba revocado
-// (posible robo), revoca la familia completa y devuelve ErrRefreshReuse.
-func (s *AuthService) Refresh(ctx context.Context, refreshToken string) (*domain.TokenPair, error) {
+// Refresh rota un refresh token vigente a cambio del access token anterior
+// (claims, con firma verificada aunque haya expirado): no se entrega una
+// llave nueva sin recoger la vieja, que queda revocada en la denylist. Si
+// el refresh token ya estaba revocado (posible robo), revoca la familia
+// completa y devuelve ErrRefreshReuse.
+func (s *AuthService) Refresh(ctx context.Context, refreshToken string, claims *domain.AccessClaims) (*domain.TokenPair, error) {
+	if claims == nil {
+		return nil, domain.ErrInvalidRefresh
+	}
 	stored, err := s.tokens.GetRefreshTokenByHash(ctx, hashToken(refreshToken))
 	if err != nil {
+		return nil, domain.ErrInvalidRefresh
+	}
+	if claims.UserID != stored.UserID {
+		// El access entregado no es de este usuario: no se gasta el refresh.
 		return nil, domain.ErrInvalidRefresh
 	}
 	if stored.Revoked {
@@ -189,6 +199,13 @@ func (s *AuthService) Refresh(ctx context.Context, refreshToken string) (*domain
 			return nil, fmt.Errorf("auth: revocar familia: %w", err)
 		}
 		return nil, domain.ErrRefreshReuse
+	}
+
+	// Recoger la llave vieja. Si ya expiró no hace falta la denylist.
+	if claims.ExpiresAt.After(time.Now()) {
+		if err := s.revokeCurrentAccess(ctx, claims); err != nil {
+			return nil, err
+		}
 	}
 
 	// Los claims se releen del usuario: el username del access token nuevo
