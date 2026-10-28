@@ -109,6 +109,8 @@ cp db/.env.template db/.env
   ```bash
   openssl rand -hex 32
   ```
+- `ACCESS_TOKEN_TTL` / `REFRESH_TOKEN_TTL`: vigencia de los tokens en formato de duración Go (por defecto `15m` y `168h`).
+- `HTTP_ADDR`: dirección de escucha del servidor (por defecto `:8080`; también se puede pasar `--addr`).
 
 > `db/.env` contiene secretos locales y está ignorado en Git mediante `.gitignore`.
 
@@ -251,4 +253,34 @@ Para garantizar la replicabilidad del proyecto en cualquier entorno limpio sin d
   ```bash
   make run-server
   ```
-  *(Por defecto escucha en `http://localhost:8080`)*.
+  *(Ejecuta `go run . server --config db/.env`; por defecto escucha en `http://localhost:8080`)*.
+
+---
+
+## Puesta en Marcha Rápida
+
+```bash
+cp db/.env.template db/.env   # y ajustar contraseña / JWT_SECRET
+make db-up
+make migrate-up
+make ingest-songs             # solo en una base de datos nueva
+make seed-up                  # 4 usuarios del equipo, contraseña Password123!
+make run-server
+```
+
+---
+
+## API REST
+
+Base: `http://localhost:8080/api/v1`
+
+| Método | Ruta | Auth | Descripción |
+|---|---|---|---|
+| `GET` | `/healthz` (sin prefijo) | — | Healthcheck (`200 ok`) |
+| `POST` | `/auth/register` | — | Registro (`username`, `email`, `password`, `display_name?`, `avatar_url?`) → `201` + tokens + perfil |
+| `POST` | `/auth/login` | — | Login con `identifier` (email o username) y `password` → tokens + perfil |
+| `POST` | `/auth/refresh` | — | Rota el `refresh_token`; reusar uno viejo revoca toda la sesión |
+| `GET` | `/auth/me` | Bearer | Perfil del usuario autenticado |
+| `POST` | `/auth/logout` | Bearer | Revoca el access token actual y el `refresh_token`; con `all_sessions: true` cierra todas las sesiones |
+
+Access Token: JWT HS256 de 15 minutos (`sub`, `username`, `jti`, `iat`, `exp`). Refresh Token: opaco, de 7 días, guardado como hash SHA-256. Errores: `{"error": "..."}` con 400, 401, 409 o 500. Detalles y ejemplos cURL en [`implementacion.md`](implementacion.md#4-guía-de-verificación-y-pruebas-con-curl).

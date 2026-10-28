@@ -25,6 +25,7 @@ Este documento establece la especificación técnica, diseño de arquitectura y 
     - [3.5.1 Dominio y Casos de Uso (`internal/core/services/auth_service.go`)](#351-dominio-y-casos-de-uso-internalcoreservicesauth_servicego)
     - [3.5.2 Adaptadores Secundarios de Seguridad (`internal/adapters/secondary/security/`)](#352-adaptadores-secundarios-de-seguridad-internaladapterssecondarysecurity)
     - [3.5.3 Adaptadores Primarios HTTP Chi (`internal/adapters/primary/http/`)](#353-adaptadores-primarios-http-chi-internaladaptersprimaryhttp)
+    - [3.5.4 Pruebas Unitarias (`make test`)](#354-pruebas-unitarias-make-test)
 - [4. Guía de Verificación y Pruebas con cURL](#4-guía-de-verificación-y-pruebas-con-curl)
 
 ---
@@ -155,6 +156,9 @@ JWT_SECRET="generate_a_secure_32_byte_hex_secret_here"
 # Duración de tokens
 ACCESS_TOKEN_TTL="15m"
 REFRESH_TOKEN_TTL="168h" # 7 días
+
+# Dirección de escucha del servidor HTTP
+HTTP_ADDR=":8080"
 ```
 
 `db/.env` se obtiene copiando la plantilla. En un entorno limpio basta con cambiar contraseña y `JWT_SECRET`; en la máquina con el volumen preexistente `POSTGRES_PASSWORD` y `DATABASE_URL` deben usar la contraseña original (`postgres`).
@@ -450,8 +454,11 @@ Ubicación: `db/migrations/20261027000002_create_users_table.sql`
 
 Define el usuario adaptado a la red social de música: con handle `@username` único, nombre visible (`display_name`) y foto de perfil (`avatar_url`), sin jerarquía de roles.
 
+No se crean `idx_users_email` ni `idx_users_username`: las restricciones `UNIQUE` ya generan esos índices B-tree, y duplicarlos solo encarecería las escrituras. Username y email se guardan normalizados en minúsculas (lo hace `AuthService`, §3.5.1), así que la unicidad es efectivamente insensible a mayúsculas.
+
 ```sql
 -- +goose Up
+-- Las restricciones UNIQUE de username y email ya crean sus índices B-tree.
 CREATE TABLE users (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     username VARCHAR(50) UNIQUE NOT NULL,
@@ -462,9 +469,6 @@ CREATE TABLE users (
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
-
-CREATE INDEX idx_users_email ON users(email);
-CREATE INDEX idx_users_username ON users(username);
 
 -- +goose StatementBegin
 CREATE OR REPLACE FUNCTION set_updated_at()
@@ -655,7 +659,7 @@ Genera los 4 usuarios correspondientes a los integrantes del equipo descritos en
 
 ```sql
 -- Seed de Usuarios del Equipo Junkbox
--- Hash bcrypt para 'Password123!': $2b$12$PEizbOXrjE8LHclD/RRJiuKQvZRqdY.iLxrYki9Z5lAJOWmlgAUfe
+-- Hash bcrypt (coste 12) para 'Password123!': $2b$12$PEizbOXrjE8LHclD/RRJiuKQvZRqdY.iLxrYki9Z5lAJOWmlgAUfe
 
 INSERT INTO users (id, username, email, hashed_password, display_name, avatar_url) VALUES
 ('b1000000-0000-0000-0000-000000000001', 'cesar_beltran', 'cesar@junkbox.local', '$2b$12$PEizbOXrjE8LHclD/RRJiuKQvZRqdY.iLxrYki9Z5lAJOWmlgAUfe', 'César David Beltrán Loredo', 'https://api.dicebear.com/7.x/bottts/svg?seed=cesar'),
@@ -670,9 +674,11 @@ ON CONFLICT (id) DO UPDATE SET
     avatar_url = EXCLUDED.avatar_url;
 ```
 
+> El test `TestSeedHashCorrespondeAPassword123` (`internal/adapters/secondary/security/jwt_test.go`) verifica que este hash corresponde a `Password123!`. Gracias a `ON CONFLICT (id) DO UPDATE`, `make seed-up` es idempotente.
+
 #### Script de Truncate Seguro: `db/scripts/truncate_all.sql`
 
-Vacía las tablas de negocio pero **omite** `goose_db_version` y **omite** `song_metadata` (para no perder el catálogo de 1.16M canciones durante un vaciado de datos de prueba):
+Creado en la Fase 1 y usado por `make seed-down`. Vacía las tablas de negocio pero **omite** `goose_db_version` y **omite** `song_metadata` (para no perder el catálogo de 1.16M canciones durante un vaciado de datos de prueba):
 
 ```sql
 DO $$
@@ -694,21 +700,24 @@ $$;
 
 ### 3.5 Arquitectura de Código en Go (Clean Architecture / Puertos y Adaptadores)
 
-Estructura de directorios a generar en `junkbox-backend`:
+El código parte del de `t-box-backend` (sin RBAC, flotas, MQTT ni SSE). Dependencias: `go-chi/chi/v5`, `golang-jwt/jwt/v5`, `google/uuid`, `jackc/pgx/v5` (driver de `database/sql`), `joho/godotenv`, `spf13/cobra` y `golang.org/x/crypto/bcrypt`.
+
+Estructura de directorios:
 
 ```text
 junkbox-backend/
+├── main.go                      # invoca cmd.Execute()
 ├── cmd/
-│   ├── root.go
-│   └── server.go
+│   ├── root.go                  # CLI Cobra, flag --config
+│   └── server.go                # subcomando `server`: arma dependencias, purga denylist, shutdown elegante
 ├── config/
-│   └── config.go
+│   └── config.go                # DATABASE_URL, JWT_SECRET (≥32), ACCESS/REFRESH_TOKEN_TTL, HTTP_ADDR
 ├── db/
 │   ├── docker-compose.yml
 │   ├── .env.template
 │   ├── migrations/
-│   ├── queries/
-│   ├── scripts/
+│   ├── queries/                 # song_metadata.sql, users.sql, refresh_tokens.sql, revoked_tokens.sql
+│   ├── scripts/                 # ingest_songs.sql, truncate_all.sql
 │   └── seed/
 ├── internal/
 │   ├── adapters/
@@ -717,24 +726,27 @@ junkbox-backend/
 │   │   │       ├── dto/
 │   │   │       │   └── auth_dto.go
 │   │   │       ├── middleware/
-│   │   │       │   └── auth_middleware.go
+│   │   │       │   ├── auth_middleware.go        # AuthMiddleware + RevocationChecker
+│   │   │       │   └── auth_middleware_test.go
 │   │   │       ├── handlers_auth.go
 │   │   │       └── router.go
 │   │   └── secondary/
 │   │       ├── postgres/
-│   │       │   └── db.go
+│   │       │   └── db.go                         # pool database/sql + pgx, con ping
 │   │       └── security/
 │   │           ├── hasher.go
-│   │           └── jwt.go
+│   │           ├── jwt.go
+│   │           └── jwt_test.go
 │   ├── core/
 │   │   ├── domain/
-│   │   │   └── user.go
+│   │   │   └── user.go          # UserProfile, TokenPair, AccessClaims, errores de dominio
 │   │   ├── ports/
-│   │   │   └── auth_ports.go
+│   │   │   └── auth_ports.go    # UserStore, TokenStore, RevocationStore, PasswordHasher, TokenManager
 │   │   └── services/
-│   │       └── auth_service.go
+│   │       ├── auth_service.go
+│   │       └── auth_service_test.go
 │   └── store/
-│       └── sqlc/
+│       └── sqlc/                # generado por `make sqlc`
 ├── Makefile
 ├── README.md
 ├── implementacion.md
@@ -742,88 +754,139 @@ junkbox-backend/
 └── go.mod
 ```
 
+Las dependencias apuntan hacia el núcleo. `domain` no importa nada del proyecto y `services` solo depende de `domain`, `ports` y de los tipos de fila de `sqlc`. Los claims del JWT viajan como `domain.AccessClaims`, así que el núcleo no conoce `golang-jwt` (en t-box el servicio importaba el adaptador `security`). `*sqlc.Queries` implementa los tres stores.
+
 ---
 
 #### 3.5.1 Dominio y Casos de Uso (`internal/core/services/auth_service.go`)
 
-Interfaces requeridas por el servicio de autenticación:
+Puertos (`internal/core/ports/auth_ports.go`):
 
-- `UserStore`: Operaciones `CreateUser`, `GetUserByEmail`, `GetUserByUsername`, `GetUserByID`, `ExistsUserByEmailOrUsername`.
-- `TokenStore`: Operaciones de `refresh_tokens`.
-- `RevocationStore`: Operaciones de `revoked_access_tokens` y `user_access_revocations`.
-- `PasswordHasher`: Hasheo y verificación con `golang.org/x/crypto/bcrypt`.
-- `TokenManager`: Generación de JWTs firmados con claims (`user_id`, `username`, `jti`, `iat`, `exp`).
+- `UserStore`: `CreateUser`, `GetUserByEmail`, `GetUserByUsername`, `GetUserByID`, `ExistsUserByEmailOrUsername`. Las tres `GetUserBy*` seleccionan todas las columnas, así que sqlc devuelve el mismo tipo `sqlc.User` y no hacen falta conversores.
+- `TokenStore`: operaciones de `refresh_tokens`.
+- `RevocationStore`: operaciones de `revoked_access_tokens` y `user_access_revocations`.
+- `PasswordHasher`: `Hash` / `Compare` (bcrypt).
+- `TokenManager`: `GenerateAccess(userID, username)`, `ParseAccess(token) (*domain.AccessClaims, error)`, `TTL()`.
+
+Errores de dominio (`internal/core/domain/user.go`): `ErrInvalidCredentials`, `ErrUserAlreadyExists`, `ErrInvalidRefresh`, `ErrRefreshReuse` y el tipo `*ValidationError`, cuyo mensaje se devuelve al cliente.
 
 **Métodos de `AuthService`:**
 
-1. `Register(ctx, username, email, password, displayName, avatarURL) (*TokenPair, *UserProfile, error)`:
-   - Valida formato de email y longitud de username/password.
-   - Verifica unicidad mediante `ExistsUserByEmailOrUsername`.
-   - Genera hash bcrypt (coste 12).
-   - Inserta usuario en BD.
-   - Emite par `TokenPair` (Access + Refresh inicial con nuevo `family_id`).
+1. `Register(ctx, RegisterInput) (*TokenPair, *UserProfile, error)`:
+   - Normaliza: `trim` en todos los campos; username y email a minúsculas.
+   - Valida y devuelve `ValidationError` sin tocar la BD si algo no cumple:
+     - username con `^[a-z0-9_.]{3,50}$`;
+     - email parseable por `net/mail`, sin nombre visible y de ≤255 caracteres;
+     - password de 8 a 72 bytes (bcrypt ignora lo que pase de 72);
+     - `display_name` de ≤100 caracteres;
+     - `avatar_url`, si viene, debe ser una URL `http(s)` con host.
+   - Comprueba la unicidad con `ExistsUserByEmailOrUsername`. Si dos registros simultáneos pasan esa comprobación, el `INSERT` falla con SQLSTATE `23505`, que también se traduce a `ErrUserAlreadyExists`. Se detecta con `errors.As` contra `interface{ SQLState() string }`, que implementa `*pgconn.PgError`, sin acoplar el núcleo a pgx.
+   - Genera el hash bcrypt (coste 12), inserta el usuario (`display_name`/`avatar_url` vacíos → `NULL`) y emite el `TokenPair` inicial con un `family_id` nuevo.
 2. `Login(ctx, identifier, password) (*TokenPair, *UserProfile, error)`:
-   - Busca al usuario por email o por username.
-   - Verifica contraseña con bcrypt.
-   - Genera token par e inserta nuevo refresh token en BD.
+   - Normaliza el `identifier` a minúsculas y busca por email si contiene `@`, o por username si no.
+   - Si el usuario no existe, compara igualmente la contraseña contra un hash bcrypt fijo, para que la respuesta tarde lo mismo y no revele qué cuentas existen. Usuario inexistente y contraseña incorrecta devuelven el mismo `ErrInvalidCredentials`.
+   - Emite el par de tokens con una familia nueva.
 3. `Refresh(ctx, rawRefreshToken) (*TokenPair, error)`:
-   - Calcula hash SHA-256 del token provisto y busca en `refresh_tokens`.
-   - **Detección de Reuso:** Si el token ya estaba revocado (`revoked == true`), se detecta un posible ataque de suplantación: revoca inmediatamente toda la familia (`RevokeRefreshTokenFamily`) y devuelve `ErrRefreshReuse`.
-   - Si es válido: marca el token como revocado, emite nuevo refresh token asignando `family_id` idéntico y enlazando `replaced_by`, y emite nuevo access token.
+   - Calcula el SHA-256 del token y lo busca en `refresh_tokens`. Si no existe o expiró, devuelve `ErrInvalidRefresh`.
+   - **Detección de reuso:** si el token ya estaba revocado, revoca toda la familia (`RevokeRefreshTokenFamily`) y devuelve `ErrRefreshReuse`.
+   - **Carrera de rotación doble:** si `RevokeRefreshToken` afecta 0 filas (otra petición lo rotó entre la lectura y la revocación), se trata como reuso.
+   - Si es válido: lo revoca, emite un refresh token nuevo con el mismo `family_id`, lo enlaza en `replaced_by` y emite un access token nuevo con el username actual.
 4. `Logout(ctx, claims, rawRefreshToken, allSessions) error`:
-   - Agrega el `jti` del Access Token actual a `revoked_access_tokens`.
-   - Revoca el refresh token actual o todos los del usuario si `allSessions == true`.
-5. `Me(ctx, claims) (*UserProfile, error)`:
-   - Resuelve el perfil del usuario autenticado a partir de su `user_id`.
+   - Revoca el refresh token enviado (idempotente).
+   - Agrega el `jti` del access token actual a `revoked_access_tokens`, con su `exp` para poder purgarlo.
+   - Si `allSessions == true`, registra un corte global en `user_access_revocations` y revoca todos los refresh tokens del usuario.
+   - Enviar un refresh token ya revocado después del logout dispara la detección de reuso y revoca su familia; es intencional.
+5. `Me(ctx, claims) (*UserProfile, error)`: resuelve el perfil a partir de `claims.UserID`. Si el usuario ya no existe, devuelve `ErrInvalidCredentials` (401).
+
+`UserProfile` (JSON): `id`, `username`, `email`, `display_name` (string o `null`), `avatar_url` (string o `null`) y `created_at`.
 
 ---
 
 #### 3.5.2 Adaptadores Secundarios de Seguridad (`internal/adapters/secondary/security/`)
 
 1. **`hasher.go`**:
-   Implementa `PasswordHasher` mediante `bcrypt.GenerateFromPassword(pwd, 12)` y `bcrypt.CompareHashAndPassword(hash, pwd)`.
+   Implementa `PasswordHasher` con `bcrypt.GenerateFromPassword(pwd, 12)` (`DefaultBcryptCost`) y `bcrypt.CompareHashAndPassword(hash, pwd)`.
 2. **`jwt.go`**:
-   Genera tokens JWT HMAC-SHA256 conteniendo claims:
+   Genera tokens JWT HS256 con estos claims:
    - `sub`: `user_id` (UUID).
    - `username`: handle único.
-   - `jti`: identificador criptográfico único por token (`gen_random_uuid`).
+   - `jti`: UUID aleatorio, distinto en cada token.
    - `iat`: marca de tiempo de emisión.
-   - `exp`: fecha de expiración (ej. 15 minutos).
+   - `exp`: expiración (`ACCESS_TOKEN_TTL`, por defecto 15 minutos).
+   - `iss`: `junkbox-backend`.
+
+   Al validar exige `alg=HS256` (rechaza `none` y otros métodos), el emisor correcto, `exp` e `iat` presentes, `sub` como UUID y un `jti` no vacío. El resultado se convierte a `domain.AccessClaims`.
 
 ---
 
 #### 3.5.3 Adaptadores Primarios HTTP Chi (`internal/adapters/primary/http/`)
 
 1. **DTOs (`dto/auth_dto.go`):**
-   - `RegisterRequest`: `username`, `email`, `password`, `display_name`, `avatar_url`.
-   - `LoginRequest`: `identifier` (permite email o username), `password`.
+   - `RegisterRequest`: `username`, `email`, `password`, `display_name` (opcional), `avatar_url` (opcional).
+   - `LoginRequest`: `identifier` (email o username), `password`.
    - `RefreshRequest`: `refresh_token`.
    - `LogoutRequest`: `refresh_token`, `all_sessions` (booleano opcional).
-   - `AuthResponse`: `access_token`, `refresh_token`, `expires_in`, `user`.
+   - `AuthResponse`: `access_token`, `refresh_token`, `expires_in`, `user`. Lo devuelven register y login; refresh devuelve solo el par de tokens.
 2. **Handlers (`handlers_auth.go`):**
-   - Mapeo de errores de dominio (`ErrInvalidCredentials`, `ErrUserAlreadyExists`, `ErrRefreshReuse`) a códigos HTTP semánticos (400, 401, 409, 500).
+   - El cuerpo se limita a 1 MiB y se rechazan los campos desconocidos (400 `solicitud inválida`).
+   - Códigos de éxito: `register` → 201; `login`, `refresh`, `logout` y `me` → 200.
+   - Mapeo de errores de dominio:
+
+     | Error | HTTP | Mensaje |
+     |---|---|---|
+     | campos requeridos vacíos / `*ValidationError` | 400 | detalle de la validación |
+     | `ErrInvalidCredentials` | 401 | `credenciales inválidas` |
+     | `ErrInvalidRefresh` | 401 | `refresh token inválido` |
+     | `ErrRefreshReuse` | 401 | `refresh token reutilizado; sesión revocada` |
+     | `ErrUserAlreadyExists` | 409 | `el email o el username ya están registrados` |
+     | otros | 500 | `error interno` (el detalle solo va al log) |
 3. **Middleware (`middleware/auth_middleware.go`):**
    - Extrae el token `Bearer` de la cabecera `Authorization`.
-   - Valida la firma criptográfica y expiración del JWT.
-   - **Verificación contra Denylist:** Consulta si el `jti` está en `revoked_access_tokens` o si el token fue emitido antes de `user_access_revocations.revoked_before`.
-   - Inyecta los claims en el `context.Context` de la petición.
+   - Valida firma y expiración con `TokenManager.ParseAccess`.
+   - **Verificación contra la denylist (`RevocationChecker`):**
+     - Rechaza si el `jti` está en `revoked_access_tokens`.
+     - Rechaza si `iat` no es posterior al corte global `user_access_revocations.revoked_before`, truncado a segundos.
+     - Como `iat` tiene precisión de segundos, un token emitido en el mismo segundo del corte también se revoca. Así un logout global no deja vivos tokens emitidos justo antes, a costa de que un login en ese mismo segundo deba repetirse.
+     - Es fail-closed: si la BD falla, responde 401.
+   - Inyecta los `*domain.AccessClaims` en el `context.Context` de la petición (`ClaimsFromContext`).
 4. **Router (`router.go`):**
 
    ```go
+   r.Get("/healthz", ...) // 200 "ok"
+
    r.Route("/api/v1", func(r chi.Router) {
        // Endpoints Públicos
-       r.Post("/auth/register", authHandler.Register)
-       r.Post("/auth/login", authHandler.Login)
-       r.Post("/auth/refresh", authHandler.Refresh)
+       r.Post("/auth/register", opts.Auth.Register)
+       r.Post("/auth/login", opts.Auth.Login)
+       r.Post("/auth/refresh", opts.Auth.Refresh)
 
        // Endpoints Protegidos
        r.Group(func(r chi.Router) {
-           r.Use(chimw.AuthMiddleware(jwtManager, revocationChecker))
-           r.Get("/auth/me", authHandler.Me)
-           r.Post("/auth/logout", authHandler.Logout)
+           r.Use(chimw.AuthMiddleware(opts.JWT, opts.Revocation))
+           r.Get("/auth/me", opts.Auth.Me)
+           r.Post("/auth/logout", opts.Auth.Logout)
        })
    })
    ```
+
+5. **Servidor (`cmd/server.go`):**
+   - Carga la configuración con `--config db/.env`; las variables del entorno tienen prioridad.
+   - Abre el pool (10 conexiones abiertas, 5 inactivas, vida máxima de 1 h) y conecta los adaptadores.
+   - Lanza una goroutine que cada hora purga de `revoked_access_tokens` los tokens ya expirados.
+   - Ante `SIGINT`/`SIGTERM` hace un shutdown elegante con 10 s de gracia.
+
+---
+
+#### 3.5.4 Pruebas Unitarias (`make test`)
+
+- `services/auth_service_test.go`: usa fakes en memoria de los stores, del hasher y del JWT. Cubre:
+  - register: OK, opcionales vacíos, duplicado, carrera `23505` y validaciones;
+  - login: por username y por email, usuario inexistente y contraseña incorrecta;
+  - refresh: rotación con `replaced_by` y misma familia, reuso, carrera, token inexistente y expirado;
+  - logout: idempotente, denylist y `all_sessions`;
+  - me: OK y usuario borrado.
+- `security/jwt_test.go`: ida y vuelta de claims, `jti` único, token expirado, secreto distinto, tokens basura o `alg=none`, el hasher y la verificación del hash del seed.
+- `middleware/auth_middleware_test.go`: middleware (sin token, malformado, inválido, válido, revocado, fail-closed) y `RevocationChecker` (denylist, `jti` malformado, corte global antes, después y en el mismo segundo, error de BD).
 
 ---
 
@@ -852,7 +915,7 @@ curl -i -X POST http://localhost:8080/api/v1/auth/register \
   }'
 ```
 
-_Respuesta esperada: `201 Created` con par de tokens y objeto de usuario._
+_Respuesta esperada: `201 Created` con par de tokens y objeto de usuario (username y email normalizados a minúsculas). Repetir la petición responde `409 Conflict`; un username inválido (ej. `"x"`) responde `400 Bad Request` con el detalle._
 
 ---
 
@@ -867,7 +930,7 @@ curl -i -X POST http://localhost:8080/api/v1/auth/login \
   }'
 ```
 
-_Respuesta esperada: `200 OK` retornando `access_token`, `refresh_token`, `expires_in: 900` y datos del perfil de César Beltrán._
+_Respuesta esperada: `200 OK` retornando `access_token`, `refresh_token`, `expires_in: 900` y datos del perfil de César Beltrán. También funciona con `"identifier": "cesar@junkbox.local"`; una contraseña incorrecta responde `401`._
 
 ---
 
@@ -880,7 +943,7 @@ curl -i -X GET http://localhost:8080/api/v1/auth/me \
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
-_Respuesta esperada: `200 OK` con ID, username, email y avatar._
+_Respuesta esperada: `200 OK` con `id`, `username`, `email`, `display_name`, `avatar_url` y `created_at`. Sin cabecera `Authorization` responde `401`._
 
 ---
 
@@ -894,7 +957,7 @@ curl -i -X POST http://localhost:8080/api/v1/auth/refresh \
   -d "{ \"refresh_token\": \"$REFRESH_TOKEN\" }"
 ```
 
-_Respuesta esperada: `200 OK` con nuevo par de tokens. Si se reintenta enviar el refresh token viejo, debe responder `401 Unauthorized` por revocación de familia._
+_Respuesta esperada: `200 OK` con nuevo par de tokens. Si se reintenta enviar el refresh token viejo, debe responder `401 Unauthorized` (`refresh token reutilizado; sesión revocada`). Al revocarse toda la familia, el refresh token **nuevo** también queda inválido y hay que volver a hacer login._
 
 ---
 
@@ -910,3 +973,20 @@ curl -i -X POST http://localhost:8080/api/v1/auth/logout \
 _Respuesta esperada: `200 OK` con mensaje `{"message": "sesión cerrada"}`._
 
 _Si inmediatamente se vuelve a intentar `GET /api/v1/auth/me` con ese mismo `$ACCESS_TOKEN`, debe retornar `401 Unauthorized` porque el token ha quedado registrado en la denylist (`revoked_access_tokens`)._
+
+> Usa un `ACCESS_TOKEN`/`REFRESH_TOKEN` de un login nuevo: si en el paso 5 se probó el reuso, esa familia ya quedó revocada (el logout igual responde 200 por ser idempotente).
+
+---
+
+### 7. Probar Cierre de Todas las Sesiones (`all_sessions: true`)
+
+Inicia sesión dos veces con el mismo usuario (sesiones A y B) y cierra la sesión A con `all_sessions: true`:
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/auth/logout \
+  -H "Authorization: Bearer $ACCESS_TOKEN_A" \
+  -H "Content-Type: application/json" \
+  -d "{ \"refresh_token\": \"$REFRESH_TOKEN_A\", \"all_sessions\": true }"
+```
+
+_Respuesta esperada: `200 OK`. Después, `GET /auth/me` con `$ACCESS_TOKEN_B` y `POST /auth/refresh` con `$REFRESH_TOKEN_B` responden `401`. Un login posterior funciona con normalidad. Un login hecho en el mismo segundo del corte también queda invalidado (§3.5.3)._

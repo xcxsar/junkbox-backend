@@ -6,7 +6,29 @@ package sqlc
 
 import (
 	"database/sql"
+	"time"
+
+	"github.com/google/uuid"
 )
+
+type RefreshToken struct {
+	ID         uuid.UUID    `json:"id"`
+	UserID     uuid.UUID    `json:"user_id"`
+	TokenHash  string       `json:"token_hash"`
+	FamilyID   uuid.UUID    `json:"family_id"`
+	ReplacedBy *uuid.UUID   `json:"replaced_by"`
+	Revoked    bool         `json:"revoked"`
+	RevokedAt  sql.NullTime `json:"revoked_at"`
+	ExpiresAt  time.Time    `json:"expires_at"`
+	CreatedAt  time.Time    `json:"created_at"`
+}
+
+type RevokedAccessToken struct {
+	Jti       uuid.UUID `json:"jti"`
+	UserID    uuid.UUID `json:"user_id"`
+	ExpiresAt time.Time `json:"expires_at"`
+	RevokedAt time.Time `json:"revoked_at"`
+}
 
 type SongMetadatum struct {
 	ID               int32           `json:"id"`
@@ -31,4 +53,20 @@ type SongMetadatum struct {
 	DurationMs       sql.NullInt32   `json:"duration_ms"`
 	TimeSignature    sql.NullInt32   `json:"time_signature"`
 	Embedding        interface{}     `json:"embedding"`
+}
+
+type User struct {
+	ID             uuid.UUID      `json:"id"`
+	Username       string         `json:"username"`
+	Email          string         `json:"email"`
+	HashedPassword string         `json:"hashed_password"`
+	DisplayName    sql.NullString `json:"display_name"`
+	AvatarUrl      sql.NullString `json:"avatar_url"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+}
+
+type UserAccessRevocation struct {
+	UserID        uuid.UUID `json:"user_id"`
+	RevokedBefore time.Time `json:"revoked_before"`
 }

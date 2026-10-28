@@ -7,11 +7,30 @@ package sqlc
 import (
 	"context"
 	"database/sql"
+	"time"
+
+	"github.com/google/uuid"
 )
 
 type Querier interface {
 	CountSongs(ctx context.Context) (int64, error)
+	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
+	ExistsUserByEmailOrUsername(ctx context.Context, arg ExistsUserByEmailOrUsernameParams) (bool, error)
+	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshToken, error)
 	GetSongByTrackID(ctx context.Context, trackID sql.NullString) (GetSongByTrackIDRow, error)
+	GetUserAccessRevocation(ctx context.Context, userID uuid.UUID) (time.Time, error)
+	GetUserByEmail(ctx context.Context, email string) (User, error)
+	GetUserByID(ctx context.Context, id uuid.UUID) (User, error)
+	GetUserByUsername(ctx context.Context, username string) (User, error)
+	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
+	IsAccessTokenRevoked(ctx context.Context, jti uuid.UUID) (bool, error)
+	PurgeExpiredRevokedTokens(ctx context.Context) (int64, error)
+	RevokeAccessToken(ctx context.Context, arg RevokeAccessTokenParams) error
+	RevokeAllRefreshTokensByUser(ctx context.Context, userID uuid.UUID) error
+	RevokeAllUserAccessTokens(ctx context.Context, userID uuid.UUID) error
+	RevokeRefreshToken(ctx context.Context, tokenHash string) (int64, error)
+	RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID) error
+	SetRefreshTokenReplacedBy(ctx context.Context, arg SetRefreshTokenReplacedByParams) error
 }
 
 var _ Querier = (*Queries)(nil)
