@@ -1,0 +1,9 @@
+db/.env
+# Dataset fuente (~175 MB, supera el límite de GitHub); se distribuye por separado
+dataset.csv
+.DS_Store
+*.log
+bin/
+tmp/
+go.work
+go.work.sum
