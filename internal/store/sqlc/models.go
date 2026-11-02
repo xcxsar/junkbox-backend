@@ -11,6 +11,31 @@ import (
 	"github.com/google/uuid"
 )
 
+type Album struct {
+	ID          uuid.UUID      `json:"id"`
+	SpotifyID   sql.NullString `json:"spotify_id"`
+	Title       string         `json:"title"`
+	ArtistID    *uuid.UUID     `json:"artist_id"`
+	ArtistName  string         `json:"artist_name"`
+	ReleaseYear sql.NullInt32  `json:"release_year"`
+	AlbumType   string         `json:"album_type"`
+	ImageUrl    sql.NullString `json:"image_url"`
+	TotalTracks int32          `json:"total_tracks"`
+	CreatedAt   time.Time      `json:"created_at"`
+	UpdatedAt   time.Time      `json:"updated_at"`
+}
+
+type Artist struct {
+	ID         uuid.UUID      `json:"id"`
+	SpotifyID  sql.NullString `json:"spotify_id"`
+	Name       string         `json:"name"`
+	Genres     []string       `json:"genres"`
+	Popularity sql.NullInt32  `json:"popularity"`
+	ImageUrl   sql.NullString `json:"image_url"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
+}
+
 type RefreshToken struct {
 	ID         uuid.UUID    `json:"id"`
 	UserID     uuid.UUID    `json:"user_id"`
@@ -31,28 +56,34 @@ type RevokedAccessToken struct {
 }
 
 type SongMetadatum struct {
-	ID               int32           `json:"id"`
-	RawIndex         sql.NullInt32   `json:"raw_index"`
-	ArtistName       sql.NullString  `json:"artist_name"`
-	TrackName        sql.NullString  `json:"track_name"`
-	TrackID          sql.NullString  `json:"track_id"`
-	Popularity       sql.NullInt32   `json:"popularity"`
-	Year             sql.NullInt32   `json:"year"`
-	Genre            sql.NullString  `json:"genre"`
-	Danceability     sql.NullFloat64 `json:"danceability"`
-	Energy           sql.NullFloat64 `json:"energy"`
-	Key              sql.NullInt32   `json:"key"`
-	Loudness         sql.NullFloat64 `json:"loudness"`
-	Mode             sql.NullInt32   `json:"mode"`
-	Speechiness      sql.NullFloat64 `json:"speechiness"`
-	Acousticness     sql.NullFloat64 `json:"acousticness"`
-	Instrumentalness sql.NullFloat64 `json:"instrumentalness"`
-	Liveness         sql.NullFloat64 `json:"liveness"`
-	Valence          sql.NullFloat64 `json:"valence"`
-	Tempo            sql.NullFloat64 `json:"tempo"`
-	DurationMs       sql.NullInt32   `json:"duration_ms"`
-	TimeSignature    sql.NullInt32   `json:"time_signature"`
-	Embedding        interface{}     `json:"embedding"`
+	ID                     int32           `json:"id"`
+	RawIndex               sql.NullInt32   `json:"raw_index"`
+	ArtistName             sql.NullString  `json:"artist_name"`
+	TrackName              sql.NullString  `json:"track_name"`
+	TrackID                sql.NullString  `json:"track_id"`
+	Popularity             sql.NullInt32   `json:"popularity"`
+	Year                   sql.NullInt32   `json:"year"`
+	Genre                  sql.NullString  `json:"genre"`
+	Danceability           sql.NullFloat64 `json:"danceability"`
+	Energy                 sql.NullFloat64 `json:"energy"`
+	Key                    sql.NullInt32   `json:"key"`
+	Loudness               sql.NullFloat64 `json:"loudness"`
+	Mode                   sql.NullInt32   `json:"mode"`
+	Speechiness            sql.NullFloat64 `json:"speechiness"`
+	Acousticness           sql.NullFloat64 `json:"acousticness"`
+	Instrumentalness       sql.NullFloat64 `json:"instrumentalness"`
+	Liveness               sql.NullFloat64 `json:"liveness"`
+	Valence                sql.NullFloat64 `json:"valence"`
+	Tempo                  sql.NullFloat64 `json:"tempo"`
+	DurationMs             sql.NullInt32   `json:"duration_ms"`
+	TimeSignature          sql.NullInt32   `json:"time_signature"`
+	Embedding              interface{}     `json:"embedding"`
+	ArtistID               *uuid.UUID      `json:"artist_id"`
+	AlbumID                *uuid.UUID      `json:"album_id"`
+	Isrc                   sql.NullString  `json:"isrc"`
+	PendingEmbedding       bool            `json:"pending_embedding"`
+	EmbeddingAttempts      int32           `json:"embedding_attempts"`
+	NextEmbeddingAttemptAt sql.NullTime    `json:"next_embedding_attempt_at"`
 }
 
 type User struct {

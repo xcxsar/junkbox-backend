@@ -173,6 +173,10 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusUnauthorized, "refresh token inválido")
 	case errors.Is(err, domain.ErrUserAlreadyExists):
 		writeError(w, http.StatusConflict, "el email o el username ya están registrados")
+	case errors.Is(err, domain.ErrNotFound):
+		writeError(w, http.StatusNotFound, "no encontrado")
+	case errors.Is(err, domain.ErrMusicProviderUnavailable):
+		writeError(w, http.StatusBadGateway, "servicio de música no disponible")
 	default:
 		log.Printf("error interno: %v", err)
 		writeError(w, http.StatusInternalServerError, "error interno")

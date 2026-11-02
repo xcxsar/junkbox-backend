@@ -1,4 +1,4 @@
-.PHONY: db-up db-down db-ps db-logs db-reset db-shell migrate-up migrate-down migrate-status migrate-create seed-create seed-up seed-down ingest-songs sqlc build vet test run-server
+.PHONY: db-up db-down db-ps db-logs db-reset db-shell migrate-up migrate-down migrate-status migrate-create seed-create seed-up seed-down ingest-songs backfill-artists sqlc build vet test run-server
 
 DB_COMPOSE := docker compose -f db/docker-compose.yml --env-file db/.env
 GOOSE_CMD := set -a; . db/.env; set +a; goose -dir db/migrations postgres "$$DATABASE_URL"
@@ -6,7 +6,8 @@ GOOSE_CMD := set -a; . db/.env; set +a; goose -dir db/migrations postgres "$$DAT
 SEED_DIR := db/seed
 TRUNCATE_SQL := db/scripts/truncate_all.sql
 INGEST_SQL := db/scripts/ingest_songs.sql
-DATASET ?= dataset.csv
+BACKFILL_SQL := db/scripts/backfill_artists.sql
+DATASET ?= data/spotify_data.csv
 PSQL_CMD := set -a; . db/.env; set +a; $(DB_COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 --single-transaction -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
 
 db-up:
@@ -76,6 +77,11 @@ ingest-songs:
 	@if [ ! -f "$(DATASET)" ]; then echo "No se encontró $(DATASET). Uso: make ingest-songs DATASET=ruta/al.csv"; exit 1; fi
 	@$(DB_COMPOSE) cp $(INGEST_SQL) postgres:/tmp/ingest_songs.sql
 	@$(PSQL_CMD) -f /tmp/ingest_songs.sql < "$(DATASET)"
+
+# Crea los artistas y enlaza song_metadata.artist_id en un volumen cargado antes
+# de la Fase 3 (ingest-songs ya lo hace en la carga). Idempotente.
+backfill-artists:
+	@$(PSQL_CMD) < $(BACKFILL_SQL)
 
 sqlc:
 	@sqlc generate

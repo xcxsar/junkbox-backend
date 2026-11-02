@@ -7,3 +7,4 @@ bin/
 tmp/
 go.work
 go.work.sum
+data

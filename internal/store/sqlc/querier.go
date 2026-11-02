@@ -13,24 +13,65 @@ import (
 )
 
 type Querier interface {
+	// ClaimArtistByName asigna el spotify_id a un artista del CSV homónimo
+	// (spotify_id NULL). No devuelve filas si no hay ninguno libre.
+	ClaimArtistByName(ctx context.Context, arg ClaimArtistByNameParams) (uuid.UUID, error)
 	CountSongs(ctx context.Context) (int64, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
 	ExistsUserByEmailOrUsername(ctx context.Context, arg ExistsUserByEmailOrUsernameParams) (bool, error)
+	GetAlbum(ctx context.Context, arg GetAlbumParams) (GetAlbumRow, error)
+	GetArtist(ctx context.Context, arg GetArtistParams) (GetArtistRow, error)
+	// --- Importación desde Spotify (CatalogImporter, dentro de una transacción) ---
+	GetArtistIDBySpotifyID(ctx context.Context, spotifyID sql.NullString) (uuid.UUID, error)
+	// Medianas del catálogo para imputar los audio features que FreqBlog
+	// devuelve nulos (speechiness, liveness y a veces instrumentalness).
+	GetCatalogFeatureMedians(ctx context.Context) (GetCatalogFeatureMediansRow, error)
 	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshToken, error)
 	GetSongByTrackID(ctx context.Context, trackID sql.NullString) (GetSongByTrackIDRow, error)
+	// GetTrack acepta el id local o el track_id de Spotify; el otro se pasa
+	// vacío (0 / '') para que solo coincida uno de los dos índices.
+	GetTrack(ctx context.Context, arg GetTrackParams) (GetTrackRow, error)
 	GetUserAccessRevocation(ctx context.Context, userID uuid.UUID) (time.Time, error)
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (User, error)
 	GetUserByUsername(ctx context.Context, username string) (User, error)
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
 	IsAccessTokenRevoked(ctx context.Context, jti uuid.UUID) (bool, error)
+	// --- Worker de embeddings ---
+	ListPendingEmbeddingTracks(ctx context.Context, arg ListPendingEmbeddingTracksParams) ([]ListPendingEmbeddingTracksRow, error)
+	ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]ListTracksByAlbumRow, error)
+	// Solo cuenta si embedding_attempts sigue siendo el que vio el worker: un
+	// mismo track que llegó dos veces (cola y rescan) no consume dos intentos.
+	MarkEmbeddingAttemptFailed(ctx context.Context, arg MarkEmbeddingAttemptFailedParams) error
 	PurgeExpiredRevokedTokens(ctx context.Context) (int64, error)
 	RevokeAccessToken(ctx context.Context, arg RevokeAccessTokenParams) error
 	RevokeAllRefreshTokensByUser(ctx context.Context, userID uuid.UUID) error
 	RevokeAllUserAccessTokens(ctx context.Context, userID uuid.UUID) error
 	RevokeRefreshToken(ctx context.Context, tokenHash string) (int64, error)
 	RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID) error
+	SearchAlbumsTrigram(ctx context.Context, arg SearchAlbumsTrigramParams) ([]SearchAlbumsTrigramRow, error)
+	SearchArtistsTrigram(ctx context.Context, arg SearchArtistsTrigramParams) ([]SearchArtistsTrigramRow, error)
+	// Consultas del catálogo musical (Fase 3). Ninguna selecciona la columna
+	// embedding: sqlc no conoce el tipo vector, así que se expone como
+	// has_embedding y se escribe como texto ('[a,b,...]'::vector).
+	// La expresión coalesce(track_name, '') || ' ' || coalesce(artist_name, '')
+	// debe coincidir con la del índice idx_song_metadata_search_trgm.
+	// strict_word_similarity mide qué tan bien las palabras de la consulta aparecen
+	// completas dentro del texto: "Yellow Coldplay" puntúa 1.0 contra "Yellow
+	// Coldplay" y a "Espresso Sabrina Carpenter" le falta una palabra en "Nonsense
+	// Sabrina Carpenter" (0.67). similarity() desempata a favor del texto más
+	// parecido en total (el título exacto antes que uno que solo lo contiene).
+	SearchTracksTrigram(ctx context.Context, arg SearchTracksTrigramParams) ([]SearchTracksTrigramRow, error)
 	SetRefreshTokenReplacedBy(ctx context.Context, arg SetRefreshTokenReplacedByParams) error
+	UpdateSongAudioFeaturesAndEmbedding(ctx context.Context, arg UpdateSongAudioFeaturesAndEmbeddingParams) (int64, error)
+	UpsertAlbum(ctx context.Context, arg UpsertAlbumParams) (uuid.UUID, error)
+	// Los artistas simplificados de una búsqueda de canciones no traen géneros,
+	// popularidad ni imagen: en conflicto no se pisan los valores conocidos.
+	UpsertArtistBySpotifyID(ctx context.Context, arg UpsertArtistBySpotifyIDParams) (uuid.UUID, error)
+	// Una canción del CSV que ya tiene embedding conserva sus datos históricos;
+	// solo se completan los enlaces y el ISRC. pending_embedding queda TRUE solo
+	// si aún no hay vector.
+	UpsertSongFromSpotify(ctx context.Context, arg UpsertSongFromSpotifyParams) (UpsertSongFromSpotifyRow, error)
 }
 
 var _ Querier = (*Queries)(nil)

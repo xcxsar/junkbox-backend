@@ -11,8 +11,9 @@ import (
 
 // RouterOptions es lo que el router necesita para montarse.
 type RouterOptions struct {
-	Auth *AuthHandler
-	JWT  chimw.JWTValidator
+	Auth  *AuthHandler
+	Music *MusicHandler
+	JWT   chimw.JWTValidator
 	// Revocation comprueba la denylist y el corte global en cada petición
 	// autenticada. Si es nil, se omite la comprobación (tests).
 	Revocation chimw.TokenRevocation
@@ -42,6 +43,13 @@ func NewRouter(opts RouterOptions) http.Handler {
 			r.Use(chimw.AuthMiddleware(opts.JWT, opts.Revocation))
 			r.Get("/auth/me", opts.Auth.Me)
 			r.Post("/auth/logout", opts.Auth.Logout)
+
+			if opts.Music != nil {
+				r.Get("/music/search", opts.Music.Search)
+				r.Get("/music/tracks/{id}", opts.Music.Track)
+				r.Get("/music/artists/{id}", opts.Music.Artist)
+				r.Get("/music/albums/{id}", opts.Music.Album)
+			}
 		})
 	})
 

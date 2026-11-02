@@ -14,8 +14,11 @@ import (
 	"github.com/xcxsar/junkbox-backend/config"
 	httpapi "github.com/xcxsar/junkbox-backend/internal/adapters/primary/http"
 	chimw "github.com/xcxsar/junkbox-backend/internal/adapters/primary/http/middleware"
+	"github.com/xcxsar/junkbox-backend/internal/adapters/secondary/freqblog"
 	"github.com/xcxsar/junkbox-backend/internal/adapters/secondary/postgres"
 	"github.com/xcxsar/junkbox-backend/internal/adapters/secondary/security"
+	"github.com/xcxsar/junkbox-backend/internal/adapters/secondary/spotify"
+	"github.com/xcxsar/junkbox-backend/internal/core/ports"
 	"github.com/xcxsar/junkbox-backend/internal/core/services"
 	"github.com/xcxsar/junkbox-backend/internal/store/sqlc"
 )
@@ -64,12 +67,37 @@ func runServer(cmd *cobra.Command) {
 	revocationChecker := chimw.NewRevocationChecker(queries)
 	authSvc := services.NewAuthService(queries, queries, queries, hasher, jwtManager, cfg.RefreshTTL)
 
-	// 4. Purga periódica de la denylist de access tokens expirados.
+	// 4. Catálogo musical: Spotify como respaldo de la búsqueda y worker de
+	// embeddings con FreqBlog. Ambos son opcionales.
+	var provider ports.MusicProvider
+	if cfg.SpotifyEnabled() {
+		provider = spotify.New(spotify.Config{ClientID: cfg.SpotifyClientID, ClientSecret: cfg.SpotifyClientSecret})
+	} else {
+		log.Println("aviso: sin SPOTIFY_CLIENT_ID/SPOTIFY_CLIENT_SECRET; la búsqueda será solo local")
+	}
+
+	var queue ports.EmbeddingQueue
+	workerDone := make(chan struct{})
+	if cfg.FreqBlogAPIKey != "" {
+		worker := services.NewAudioFeaturesWorker(freqblog.New(freqblog.Config{APIKey: cfg.FreqBlogAPIKey}), queries, services.AudioFeaturesWorkerConfig{})
+		queue = worker
+		go func() {
+			defer close(workerDone)
+			worker.Run(ctx)
+		}()
+	} else {
+		close(workerDone)
+		log.Println("aviso: sin FREQBLOG_API_KEY; las canciones importadas quedarán sin embedding")
+	}
+	musicSvc := services.NewMusicService(queries, postgres.NewCatalogImporter(db), provider, queue, cfg.SearchFallbackThreshold)
+
+	// 5. Purga periódica de la denylist de access tokens expirados.
 	go purgeRevokedTokens(ctx, queries)
 
-	// 5. Router y servidor HTTP con shutdown elegante.
+	// 6. Router y servidor HTTP con shutdown elegante.
 	handler := httpapi.NewRouter(httpapi.RouterOptions{
 		Auth:       httpapi.NewAuthHandler(authSvc, jwtManager),
+		Music:      httpapi.NewMusicHandler(musicSvc),
 		JWT:        jwtManager,
 		Revocation: revocationChecker,
 	})
@@ -93,6 +121,8 @@ func runServer(cmd *cobra.Command) {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		fatalf("shutdown: %v", err)
 	}
+	// El worker termina de guardar su último lote antes de cerrar el pool.
+	<-workerDone
 	log.Println("servidor detenido")
 }
 
