@@ -6,7 +6,7 @@ services:
     container_name: postgres-junkbox
     restart: unless-stopped
     env_file:
-      - .env
+      - ../.env
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:

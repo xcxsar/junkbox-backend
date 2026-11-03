@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -216,8 +217,10 @@ type fakeJWT struct{ ttl time.Duration }
 func (f *fakeJWT) GenerateAccess(userID uuid.UUID, _ string) (string, error) {
 	return "access." + userID.String(), nil
 }
-func (f *fakeJWT) ParseAccess(string) (*domain.AccessClaims, error) { return nil, errors.New("no usado") }
-func (f *fakeJWT) TTL() time.Duration                               { return f.ttl }
+func (f *fakeJWT) ParseAccess(string) (*domain.AccessClaims, error) {
+	return nil, errors.New("no usado")
+}
+func (f *fakeJWT) TTL() time.Duration { return f.ttl }
 
 // uniqueViolation imita a *pgconn.PgError con SQLSTATE 23505.
 type uniqueViolation struct{}
@@ -343,13 +346,17 @@ func TestRegisterCarreraUniqueViolation(t *testing.T) {
 
 func TestRegisterValidaciones(t *testing.T) {
 	cases := map[string]func(*RegisterInput){
-		"username corto":       func(in *RegisterInput) { in.Username = "ab" },
-		"username con espacio": func(in *RegisterInput) { in.Username = "mel omano" },
-		"email inválido":       func(in *RegisterInput) { in.Email = "no-es-email" },
-		"email con nombre":     func(in *RegisterInput) { in.Email = "Mel <mel@x.mx>" },
-		"password corta":       func(in *RegisterInput) { in.Password = "corta" },
-		"password > 72 bytes":  func(in *RegisterInput) { in.Password = string(make([]byte, 73)) },
-		"avatar no http":       func(in *RegisterInput) { in.AvatarURL = "javascript:alert(1)" },
+		"username corto":                  func(in *RegisterInput) { in.Username = "ab" },
+		"username con espacio":            func(in *RegisterInput) { in.Username = "mel omano" },
+		"email inválido":                  func(in *RegisterInput) { in.Email = "no-es-email" },
+		"email con nombre":                func(in *RegisterInput) { in.Email = "Mel <mel@x.mx>" },
+		"password corta":                  func(in *RegisterInput) { in.Password = "Ab1!" },
+		"password > 72 bytes":             func(in *RegisterInput) { in.Password = "Aa1!" + strings.Repeat("a", 69) },
+		"password sin números":            func(in *RegisterInput) { in.Password = "Password!!" },
+		"password sin letras":             func(in *RegisterInput) { in.Password = "12345678!" },
+		"password sin especiales":         func(in *RegisterInput) { in.Password = "Password123" },
+		"password 8 bytes y 5 caracteres": func(in *RegisterInput) { in.Password = "ñññ1!" },
+		"avatar no http":                  func(in *RegisterInput) { in.AvatarURL = "javascript:alert(1)" },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -363,6 +370,18 @@ func TestRegisterValidaciones(t *testing.T) {
 			}
 			if env.users.existsCalls != 0 {
 				t.Error("no debe consultarse la BD si la validación falla")
+			}
+		})
+	}
+}
+
+func TestRegisterPasswordsValidas(t *testing.T) {
+	for _, pw := range []string{"Password123!", "Contraseña1!", "ñññññ1!a", "abc 123 #"} {
+		t.Run(pw, func(t *testing.T) {
+			in := validRegister()
+			in.Password = pw
+			if _, _, err := newEnv().svc.Register(context.Background(), in); err != nil {
+				t.Fatalf("Register(%q): %v", pw, err)
 			}
 		})
 	}

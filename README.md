@@ -92,13 +92,13 @@ choco install make
 
 ## Configuración del Entorno de Base de Datos
 
-1. Copia la plantilla de variables de entorno ubicada en `db/.env.template` hacia `db/.env`:
+1. Copia la plantilla de variables de entorno ubicada en `.env.template` hacia `.env`:
 
 ```bash
-cp db/.env.template db/.env
+cp .env.template .env
 ```
 
-2. Configura los parámetros en `db/.env`:
+2. Configura los parámetros en `.env`:
 
 - `POSTGRES_DB`: Nombre de la base de datos principal (`junkbox_db`).
 - `POSTGRES_USER`: Usuario administrador de PostgreSQL (`postgres`).
@@ -115,7 +115,7 @@ cp db/.env.template db/.env
 - `FREQBLOG_API_KEY` (opcional): clave de [FreqBlog](https://freqblog.com), de donde salen los audio features de las canciones importadas desde Spotify. Spotify cerró `/v1/audio-features` para apps nuevas en noviembre de 2024. Sin la clave, esas canciones quedan sin embedding (`pending_embedding: true`). El plan gratuito incluye 1.000 canciones resueltas al mes.
 - `SEARCH_FALLBACK_THRESHOLD` (opcional, por defecto `0.8`): puntaje mínimo (`strict_word_similarity`, de 0 a 1) del mejor resultado local para no consultar Spotify.
 
-> `db/.env` contiene secretos locales y está ignorado en Git mediante `.gitignore`.
+> `.env` contiene secretos locales y está ignorado en Git mediante `.gitignore`.
 
 > Si reutilizas un volumen `postgres-junkbox-data` ya inicializado, `POSTGRES_PASSWORD` (y la contraseña de `DATABASE_URL`) deben coincidir con la contraseña con la que se creó. Postgres ignora estas variables una vez que el volumen tiene datos.
 
@@ -256,14 +256,14 @@ Para reconstruirlo en cualquier entorno limpio, sin copiar volúmenes Docker a m
   ```bash
   make run-server
   ```
-  *(Ejecuta `go run . server --config db/.env`; por defecto escucha en `http://localhost:8080`)*.
+  *(Ejecuta `go run . server --config .env`; por defecto escucha en `http://localhost:8080`)*.
 
 ---
 
 ## Puesta en Marcha Rápida
 
 ```bash
-cp db/.env.template db/.env   # y ajustar contraseña, JWT_SECRET, credenciales de Spotify y FREQBLOG_API_KEY
+cp .env.template .env   # y ajustar contraseña, JWT_SECRET, credenciales de Spotify y FREQBLOG_API_KEY
 make db-up
 make migrate-up
 make ingest-songs             # solo en una base de datos nueva (requiere data/spotify_data.csv)
@@ -318,7 +318,7 @@ Crea una nueva cuenta de usuario en la plataforma. Emite un par inicial de token
 **Cuerpo de la petición (JSON):**
 - `username` (string, obligatorio): Nombre de usuario único (handle).
 - `email` (string, obligatorio): Correo electrónico válido y único.
-- `password` (string, obligatorio): Contraseña (mínimo 8 caracteres).
+- `password` (string, obligatorio): Contraseña de mínimo 8 caracteres que incluya letras, números y caracteres especiales (máximo 72 bytes).
 - `display_name` (string, opcional): Nombre visible.
 - `avatar_url` (string, opcional): Enlace a imagen de perfil.
 

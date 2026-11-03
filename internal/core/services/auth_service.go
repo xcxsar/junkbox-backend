@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -26,7 +27,7 @@ import (
 
 // Límites de validación del registro (alineados con el esquema de users).
 const (
-	minPasswordBytes   = 8
+	minPasswordChars   = 8
 	maxPasswordBytes   = 72 // bcrypt ignora lo que pasa de 72 bytes
 	maxEmailLen        = 255
 	maxDisplayNameLen  = 100
@@ -337,8 +338,8 @@ func validateRegister(in RegisterInput) error {
 	if addr, err := mail.ParseAddress(in.Email); err != nil || addr.Address != in.Email {
 		return domain.NewValidationError("email inválido")
 	}
-	if len(in.Password) < minPasswordBytes || len(in.Password) > maxPasswordBytes {
-		return domain.NewValidationError(fmt.Sprintf("la contraseña debe tener entre %d y %d bytes", minPasswordBytes, maxPasswordBytes))
+	if err := validatePassword(in.Password); err != nil {
+		return err
 	}
 	if utf8.RuneCountInString(in.DisplayName) > maxDisplayNameLen {
 		return domain.NewValidationError(fmt.Sprintf("display_name no puede superar %d caracteres", maxDisplayNameLen))
@@ -348,6 +349,33 @@ func validateRegister(in RegisterInput) error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || len(in.AvatarURL) > maxAvatarURLLength {
 			return domain.NewValidationError("avatar_url debe ser una URL http(s) válida")
 		}
+	}
+	return nil
+}
+
+// validatePassword exige al menos minPasswordChars caracteres, como máximo
+// maxPasswordBytes bytes y al menos una letra, un número y un carácter
+// especial (puntuación o símbolo).
+func validatePassword(pw string) error {
+	if utf8.RuneCountInString(pw) < minPasswordChars {
+		return domain.NewValidationError(fmt.Sprintf("la contraseña debe tener al menos %d caracteres", minPasswordChars))
+	}
+	if len(pw) > maxPasswordBytes {
+		return domain.NewValidationError(fmt.Sprintf("la contraseña no puede superar %d bytes", maxPasswordBytes))
+	}
+	var hasLetter, hasDigit, hasSpecial bool
+	for _, r := range pw {
+		switch {
+		case unicode.IsLetter(r):
+			hasLetter = true
+		case unicode.IsDigit(r):
+			hasDigit = true
+		case unicode.IsPunct(r) || unicode.IsSymbol(r):
+			hasSpecial = true
+		}
+	}
+	if !hasLetter || !hasDigit || !hasSpecial {
+		return domain.NewValidationError("la contraseña debe incluir letras, números y caracteres especiales")
 	}
 	return nil
 }

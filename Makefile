@@ -1,14 +1,14 @@
 .PHONY: db-up db-down db-ps db-logs db-reset db-shell migrate-up migrate-down migrate-status migrate-create seed-create seed-up seed-down ingest-songs backfill-artists sqlc build vet test run-server
 
-DB_COMPOSE := docker compose -f db/docker-compose.yml --env-file db/.env
-GOOSE_CMD := set -a; . db/.env; set +a; goose -dir db/migrations postgres "$$DATABASE_URL"
+DB_COMPOSE := docker compose -f db/docker-compose.yml --env-file .env
+GOOSE_CMD := set -a; . ./.env; set +a; goose -dir db/migrations postgres "$$DATABASE_URL"
 
 SEED_DIR := db/seed
 TRUNCATE_SQL := db/scripts/truncate_all.sql
 INGEST_SQL := db/scripts/ingest_songs.sql
 BACKFILL_SQL := db/scripts/backfill_artists.sql
 DATASET ?= data/spotify_data.csv
-PSQL_CMD := set -a; . db/.env; set +a; $(DB_COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 --single-transaction -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+PSQL_CMD := set -a; . ./.env; set +a; $(DB_COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 --single-transaction -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
 
 db-up:
 	@$(DB_COMPOSE) up -d --wait
@@ -31,7 +31,7 @@ db-reset:
 	@$(DB_COMPOSE) up -d --wait
 
 db-shell:
-	@set -a; . db/.env; set +a; $(DB_COMPOSE) exec postgres psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+	@set -a; . ./.env; set +a; $(DB_COMPOSE) exec postgres psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
 
 migrate-up:
 	@$(GOOSE_CMD) up
@@ -96,4 +96,4 @@ test:
 	@go test ./...
 
 run-server:
-	@go run . server --config db/.env
+	@go run . server --config .env

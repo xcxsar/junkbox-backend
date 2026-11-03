@@ -11,7 +11,7 @@ Este documento establece la especificación técnica, diseño de arquitectura y 
   - [2.1 Análisis Técnico: Reproducibilidad del Volumen Docker vs. Ingesta CSV](#21-análisis-técnico-reproducibilidad-del-volumen-docker-vs-ingesta-csv)
   - [2.2 Transición Segura del Contenedor Docker y Preservación de Datos](#22-transición-segura-del-contenedor-docker-y-preservación-de-datos)
   - [2.3 Archivo `db/docker-compose.yml`](#23-archivo-dbdocker-composeyml)
-  - [2.4 Configuración de Entorno: `db/.env.template` y `db/.env`](#24-configuración-de-entorno-dbenvtemplate-y-dbenv)
+  - [2.4 Configuración de Entorno: `.env.template` y `.env`](#24-configuración-de-entorno-envtemplate-y-env)
   - [2.5 Automatización con `Makefile` (con Salvaguarda en `db-reset`)](#25-automatización-con-makefile-con-salvaguarda-en-db-reset)
   - [2.6 Migración Inicial de Goose: `init_song_metadata`](#26-migración-inicial-de-goose-init_song_metadata)
   - [2.7 Configuración del Compilador SQLC: `sqlc.yaml`](#27-configuración-del-compilador-sqlc-sqlcyaml)
@@ -91,7 +91,7 @@ ALTER INDEX idx_songs_genre RENAME TO idx_song_metadata_genre;
 ALTER INDEX idx_songs_embedding_ivfflat RENAME TO idx_song_metadata_embedding_ivfflat;"
 ```
 
-> **Credenciales del volumen existente:** el contenedor original se creó con `POSTGRES_USER=postgres` y `POSTGRES_PASSWORD=postgres`. Como el volumen ya está inicializado, Postgres ignora esas variables en arranques posteriores, así que el `db/.env` de esta máquina debe usar `postgres` como contraseña (ver §2.4).
+> **Credenciales del volumen existente:** el contenedor original se creó con `POSTGRES_USER=postgres` y `POSTGRES_PASSWORD=postgres`. Como el volumen ya está inicializado, Postgres ignora esas variables en arranques posteriores, así que el `.env` de esta máquina debe usar `postgres` como contraseña (ver §2.4).
 
 #### Paso 2: Detener y Eliminar ÚNICAMENTE el Contenedor (Sin tocar el volumen)
 
@@ -122,7 +122,7 @@ services:
     container_name: postgres-junkbox
     restart: unless-stopped
     env_file:
-      - .env
+      - ../.env
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -141,9 +141,9 @@ volumes:
 
 ---
 
-### 2.4 Configuración de Entorno: `db/.env.template` y `db/.env`
+### 2.4 Configuración de Entorno: `.env.template` y `.env`
 
-Ubicación: `db/.env.template`
+Ubicación: `.env.template`
 
 ```bash
 # Configuración del Motor PostgreSQL
@@ -183,9 +183,9 @@ FREQBLOG_API_KEY=""
 SEARCH_FALLBACK_THRESHOLD=0.8
 ```
 
-`db/.env` se obtiene copiando la plantilla. En un entorno limpio basta con cambiar la contraseña y `JWT_SECRET` (las variables de Spotify y FreqBlog son opcionales; ver §4.7); en la máquina con el volumen preexistente `POSTGRES_PASSWORD` y `DATABASE_URL` deben usar la contraseña original (`postgres`).
+`.env` se obtiene copiando la plantilla. En un entorno limpio basta con cambiar la contraseña y `JWT_SECRET` (las variables de Spotify y FreqBlog son opcionales; ver §4.7); en la máquina con el volumen preexistente `POSTGRES_PASSWORD` y `DATABASE_URL` deben usar la contraseña original (`postgres`).
 
-`db/.env` y `dataset.csv` (~175 MB, por encima del límite de 100 MB de GitHub) están listados en `.gitignore`; el CSV se distribuye por separado.
+`.env` y `dataset.csv` (~175 MB, por encima del límite de 100 MB de GitHub) están listados en `.gitignore`; el CSV se distribuye por separado.
 
 ---
 
@@ -198,15 +198,15 @@ Se introduce una confirmación obligatoria en `db-reset` para evitar la pérdida
 ```makefile
 .PHONY: db-up db-down db-ps db-logs db-reset db-shell migrate-up migrate-down migrate-status migrate-create seed-create seed-up seed-down ingest-songs backfill-artists sqlc build vet test run-server
 
-DB_COMPOSE := docker compose -f db/docker-compose.yml --env-file db/.env
-GOOSE_CMD := set -a; . db/.env; set +a; goose -dir db/migrations postgres "$$DATABASE_URL"
+DB_COMPOSE := docker compose -f db/docker-compose.yml --env-file .env
+GOOSE_CMD := set -a; . ./.env; set +a; goose -dir db/migrations postgres "$$DATABASE_URL"
 
 SEED_DIR := db/seed
 TRUNCATE_SQL := db/scripts/truncate_all.sql
 INGEST_SQL := db/scripts/ingest_songs.sql
 BACKFILL_SQL := db/scripts/backfill_artists.sql
 DATASET ?= data/spotify_data.csv
-PSQL_CMD := set -a; . db/.env; set +a; $(DB_COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 --single-transaction -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+PSQL_CMD := set -a; . ./.env; set +a; $(DB_COMPOSE) exec -T postgres psql -v ON_ERROR_STOP=1 --single-transaction -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
 
 db-up:
 	@$(DB_COMPOSE) up -d --wait
@@ -229,7 +229,7 @@ db-reset:
 	@$(DB_COMPOSE) up -d --wait
 
 db-shell:
-	@set -a; . db/.env; set +a; $(DB_COMPOSE) exec postgres psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
+	@set -a; . ./.env; set +a; $(DB_COMPOSE) exec postgres psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"
 
 migrate-up:
 	@$(GOOSE_CMD) up
@@ -294,7 +294,7 @@ test:
 	@go test ./...
 
 run-server:
-	@go run . server --config db/.env
+	@go run . server --config .env
 ```
 
 ---
@@ -764,6 +764,7 @@ Estructura de directorios:
 
 ```text
 junkbox-backend/
+├── .env.template                # plantilla de variables de entorno (copiar a .env)
 ├── main.go                      # invoca cmd.Execute()
 ├── cmd/
 │   ├── root.go                  # CLI Cobra, flag --config
@@ -772,7 +773,6 @@ junkbox-backend/
 │   └── config.go                # DATABASE_URL, JWT_SECRET (≥32), ACCESS/REFRESH_TOKEN_TTL, HTTP_ADDR; F3: SPOTIFY_*, FREQBLOG_API_KEY, SEARCH_FALLBACK_THRESHOLD
 ├── db/
 │   ├── docker-compose.yml
-│   ├── .env.template
 │   ├── migrations/
 │   ├── queries/                 # song_metadata.sql, users.sql, refresh_tokens.sql, revoked_tokens.sql, catalog.sql (F3)
 │   ├── scripts/                 # ingest_songs.sql, truncate_all.sql, backfill_artists.sql (F3)
@@ -849,7 +849,7 @@ Errores de dominio (`internal/core/domain/user.go`): `ErrInvalidCredentials`, `E
    - Valida y devuelve `ValidationError` sin tocar la BD si algo no cumple:
      - username con `^[a-z0-9_.]{3,50}$`;
      - email parseable por `net/mail`, sin nombre visible y de ≤255 caracteres;
-     - password de 8 a 72 bytes (bcrypt ignora lo que pase de 72);
+     - password de al menos 8 caracteres y como máximo 72 bytes (bcrypt ignora lo que pase de 72), con al menos una letra, un número y un carácter especial (puntuación o símbolo Unicode);
      - `display_name` de ≤100 caracteres;
      - `avatar_url`, si viene, debe ser una URL `http(s)` con host.
    - Comprueba la unicidad con `ExistsUserByEmailOrUsername`. Si dos registros simultáneos pasan esa comprobación, el `INSERT` falla con SQLSTATE `23505`, que también se traduce a `ErrUserAlreadyExists`. Se detecta con `errors.As` contra `interface{ SQLState() string }`, que implementa `*pgconn.PgError`, sin acoplar el núcleo a pgx.
@@ -942,7 +942,7 @@ Errores de dominio (`internal/core/domain/user.go`): `ErrInvalidCredentials`, `E
    ```
 
 5. **Servidor (`cmd/server.go`):**
-   - Carga la configuración con `--config db/.env`; las variables del entorno tienen prioridad.
+   - Carga la configuración con `--config .env`; las variables del entorno tienen prioridad.
    - Abre el pool (10 conexiones abiertas, 5 inactivas, vida máxima de 1 h) y conecta los adaptadores.
    - Lanza una goroutine que cada hora purga de `revoked_access_tokens` los tokens ya expirados.
    - Ante `SIGINT`/`SIGTERM` hace un shutdown elegante con 10 s de gracia.
@@ -1538,7 +1538,7 @@ Las rutas están en el grupo protegido por `AuthMiddleware` (`router.go`), en `h
 | `ErrMusicProviderUnavailable` | 502 | `servicio de música no disponible` |
 | otros | 500 | `error interno` |
 
-#### Configuración (`db/.env`)
+#### Configuración (`.env`)
 
 | Variable | Requerida | Default | Uso |
 |---|---|---|---|
@@ -1698,7 +1698,7 @@ _Respuesta esperada: `200 OK` con `"source": "local_cache"` y "Yellow" de Coldpl
 
 ### 9. Probar Búsqueda con Fallback a Spotify API (Cache-Miss)
 
-Requiere `SPOTIFY_CLIENT_ID` y `SPOTIFY_CLIENT_SECRET` en `db/.env`. Busca una canción que no esté en el CSV (posterior a 2023):
+Requiere `SPOTIFY_CLIENT_ID` y `SPOTIFY_CLIENT_SECRET` en `.env`. Busca una canción que no esté en el CSV (posterior a 2023):
 
 ```bash
 curl -i -X GET "http://localhost:8080/api/v1/music/search?q=Espresso%20Sabrina%20Carpenter&type=track&limit=5" \
