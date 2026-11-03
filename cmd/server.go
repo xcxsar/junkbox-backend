@@ -96,10 +96,11 @@ func runServer(cmd *cobra.Command) {
 
 	// 6. Router y servidor HTTP con shutdown elegante.
 	handler := httpapi.NewRouter(httpapi.RouterOptions{
-		Auth:       httpapi.NewAuthHandler(authSvc, jwtManager),
-		Music:      httpapi.NewMusicHandler(musicSvc),
-		JWT:        jwtManager,
-		Revocation: revocationChecker,
+		Auth:           httpapi.NewAuthHandler(authSvc, jwtManager),
+		Music:          httpapi.NewMusicHandler(musicSvc),
+		JWT:            jwtManager,
+		Revocation:     revocationChecker,
+		AllowedOrigins: cfg.CORSAllowedOrigins,
 	})
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,

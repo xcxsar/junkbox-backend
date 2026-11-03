@@ -4,8 +4,10 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
@@ -35,6 +37,10 @@ type Config struct {
 	// SearchFallbackThreshold es el puntaje mínimo del mejor resultado
 	// local para no consultar Spotify, en (0, 1] (default 0.8).
 	SearchFallbackThreshold float64
+	// CORSAllowedOrigins son los orígenes (esquema://host[:puerto]) del
+	// frontend que pueden llamar a la API desde el navegador
+	// (default http://localhost:5173).
+	CORSAllowedOrigins []string
 }
 
 // SpotifyEnabled indica si hay credenciales de Spotify.
@@ -60,6 +66,8 @@ func Load(envFile string) (*Config, error) {
 		SpotifyClientID:     os.Getenv("SPOTIFY_CLIENT_ID"),
 		SpotifyClientSecret: os.Getenv("SPOTIFY_CLIENT_SECRET"),
 		FreqBlogAPIKey:      os.Getenv("FREQBLOG_API_KEY"),
+
+		CORSAllowedOrigins: listOr("CORS_ALLOWED_ORIGINS", []string{"http://localhost:5173"}),
 	}
 
 	accessTTL, err := durationOr("ACCESS_TOKEN_TTL", 15*time.Minute)
@@ -105,7 +113,30 @@ func (c *Config) validate() error {
 	if c.SearchFallbackThreshold <= 0 || c.SearchFallbackThreshold > 1 {
 		return fmt.Errorf("config: SEARCH_FALLBACK_THRESHOLD debe estar en (0, 1]")
 	}
+	// Una lista vacía o un comodín abrirían la API a cualquier origen.
+	if len(c.CORSAllowedOrigins) == 0 {
+		return fmt.Errorf("config: CORS_ALLOWED_ORIGINS no puede estar vacía")
+	}
+	for _, origin := range c.CORSAllowedOrigins {
+		if !validOrigin(origin) {
+			return fmt.Errorf("config: CORS_ALLOWED_ORIGINS contiene un origen inválido (%q): se espera http(s)://host[:puerto], sin ruta ni comodines", origin)
+		}
+	}
 	return nil
+}
+
+// validOrigin acepta un origen exacto http(s)://host[:puerto], sin ruta,
+// query ni comodines.
+func validOrigin(origin string) bool {
+	if strings.Contains(origin, "*") {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return (u.Scheme == "http" || u.Scheme == "https") && u.Host != "" &&
+		u.Path == "" && u.RawQuery == "" && u.Fragment == "" && u.User == nil
 }
 
 func envOr(key, fallback string) string {
@@ -141,4 +172,20 @@ func floatOr(key string, fallback float64) (float64, error) {
 		return 0, fmt.Errorf("config: %s inválida (%q): %w", key, v, err)
 	}
 	return f, nil
+}
+
+// listOr parsea una lista separada por comas (descartando elementos vacíos)
+// o devuelve el fallback si la variable no está definida.
+func listOr(key string, fallback []string) []string {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	var out []string
+	for _, item := range strings.Split(v, ",") {
+		if item = strings.TrimSpace(item); item != "" {
+			out = append(out, item)
+		}
+	}
+	return out
 }

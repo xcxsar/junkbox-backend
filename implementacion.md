@@ -181,6 +181,9 @@ FREQBLOG_API_KEY=""
 # no consultar Spotify. Con 0.8, a una consulta de tres palabras no le puede
 # faltar ninguna en el resultado local.
 SEARCH_FALLBACK_THRESHOLD=0.8
+
+# Orígenes del frontend permitidos por CORS (separados por coma, sin "/" final).
+CORS_ALLOWED_ORIGINS="http://localhost:5173"
 ```
 
 `.env` se obtiene copiando la plantilla. En un entorno limpio basta con cambiar la contraseña y `JWT_SECRET` (las variables de Spotify y FreqBlog son opcionales; ver §4.7); en la máquina con el volumen preexistente `POSTGRES_PASSWORD` y `DATABASE_URL` deben usar la contraseña original (`postgres`).
@@ -758,7 +761,7 @@ $$;
 
 ### 3.5 Arquitectura de Código en Go (Clean Architecture / Puertos y Adaptadores)
 
-El código parte del de `t-box-backend` (sin RBAC, flotas, MQTT ni SSE). Dependencias: `go-chi/chi/v5`, `golang-jwt/jwt/v5`, `google/uuid`, `jackc/pgx/v5` (driver de `database/sql`), `joho/godotenv`, `spf13/cobra` y `golang.org/x/crypto/bcrypt`.
+El código parte del de `t-box-backend` (sin RBAC, flotas, MQTT ni SSE). Dependencias: `go-chi/chi/v5`, `golang-jwt/jwt/v5`, `google/uuid`, `jackc/pgx/v5` (driver de `database/sql`), `joho/godotenv`, `spf13/cobra`, `golang.org/x/crypto/bcrypt` y `go-chi/cors`.
 
 Estructura de directorios:
 
@@ -770,7 +773,7 @@ junkbox-backend/
 │   ├── root.go                  # CLI Cobra, flag --config
 │   └── server.go                # subcomando `server`: arma dependencias, purga denylist, shutdown elegante
 ├── config/
-│   └── config.go                # DATABASE_URL, JWT_SECRET (≥32), ACCESS/REFRESH_TOKEN_TTL, HTTP_ADDR; F3: SPOTIFY_*, FREQBLOG_API_KEY, SEARCH_FALLBACK_THRESHOLD
+│   └── config.go                # DATABASE_URL, JWT_SECRET (≥32), ACCESS/REFRESH_TOKEN_TTL, HTTP_ADDR; F3: SPOTIFY_*, FREQBLOG_API_KEY, SEARCH_FALLBACK_THRESHOLD; CORS_ALLOWED_ORIGINS
 ├── db/
 │   ├── docker-compose.yml
 │   ├── migrations/
@@ -788,7 +791,8 @@ junkbox-backend/
 │   │   │       │   └── auth_middleware_test.go
 │   │   │       ├── handlers_auth.go
 │   │   │       ├── handlers_music.go             # F3: /music/search, tracks, artists, albums
-│   │   │       └── router.go
+│   │   │       ├── router.go                     # rutas + CORS (go-chi/cors) restringido a CORS_ALLOWED_ORIGINS
+│   │   │       └── router_test.go
 │   │   └── secondary/
 │   │       ├── freqblog/                         # F3: audio features (reemplazo de Spotify)
 │   │       │   ├── client.go
@@ -922,6 +926,8 @@ Errores de dominio (`internal/core/domain/user.go`): `ErrInvalidCredentials`, `E
      - Es fail-closed: si la BD falla, responde 401.
    - Inyecta los `*domain.AccessClaims` en el `context.Context` de la petición (`ClaimsFromContext`).
 4. **Router (`router.go`):**
+
+   Antes de las rutas se monta `cors.Handler` (`go-chi/cors`) con los orígenes de `CORS_ALLOWED_ORIGINS` (por defecto `http://localhost:5173`), métodos `GET`/`POST`/`OPTIONS`, cabeceras `Authorization` y `Content-Type`, y sin credenciales (la auth no usa cookies). `config.Load` rechaza una lista vacía, comodines y orígenes con ruta. Además, `go-chi/cors` trata una lista vacía como "todos los orígenes", así que el router la convierte en "ninguno".
 
    ```go
    r.Get("/healthz", ...) // 200 "ok"
