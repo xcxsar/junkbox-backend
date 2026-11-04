@@ -4,6 +4,7 @@ package config
 
 import (
 	"fmt"
+	"net/mail"
 	"net/url"
 	"os"
 	"strconv"
@@ -41,7 +42,36 @@ type Config struct {
 	// frontend que pueden llamar a la API desde el navegador
 	// (default http://localhost:5173).
 	CORSAllowedOrigins []string
+
+	// FrontendURL es el origen del frontend al que apuntan los enlaces de
+	// los correos (default: el primer origen de CORS_ALLOWED_ORIGINS).
+	FrontendURL string
+	// PasswordResetTTL es la vigencia del enlace de recuperación (default 30m).
+	PasswordResetTTL time.Duration
+	// EmailVerificationTTL es la vigencia del enlace de verificación (default 24h).
+	EmailVerificationTTL time.Duration
+	// MailDriver elige cómo se envían los correos: "log" (los escribe en la
+	// consola; default) o "smtp".
+	MailDriver string
+	// MailFrom es el remitente, p. ej. "JunkBox <no-reply@tu-dominio>".
+	// Obligatorio con MAIL_DRIVER=smtp.
+	MailFrom string
+	// SMTP* configuran el driver smtp (Resend: smtp.resend.com, 587,
+	// usuario "resend", contraseña = API key; Mailpit: localhost, 1025,
+	// sin usuario, SMTP_TLS=none).
+	SMTPHost     string
+	SMTPPort     int
+	SMTPUsername string
+	SMTPPassword string
+	// SMTPTLS es "starttls" (default), "tls" (implícito, 465) o "none".
+	SMTPTLS string
 }
+
+// Drivers de correo admitidos en MAIL_DRIVER.
+const (
+	MailDriverLog  = "log"
+	MailDriverSMTP = "smtp"
+)
 
 // SpotifyEnabled indica si hay credenciales de Spotify.
 func (c *Config) SpotifyEnabled() bool {
@@ -68,6 +98,17 @@ func Load(envFile string) (*Config, error) {
 		FreqBlogAPIKey:      os.Getenv("FREQBLOG_API_KEY"),
 
 		CORSAllowedOrigins: listOr("CORS_ALLOWED_ORIGINS", []string{"http://localhost:5173"}),
+
+		FrontendURL:  os.Getenv("FRONTEND_URL"),
+		MailDriver:   envOr("MAIL_DRIVER", MailDriverLog),
+		MailFrom:     os.Getenv("MAIL_FROM"),
+		SMTPHost:     os.Getenv("SMTP_HOST"),
+		SMTPUsername: os.Getenv("SMTP_USERNAME"),
+		SMTPPassword: os.Getenv("SMTP_PASSWORD"),
+		SMTPTLS:      envOr("SMTP_TLS", "starttls"),
+	}
+	if cfg.FrontendURL == "" && len(cfg.CORSAllowedOrigins) > 0 {
+		cfg.FrontendURL = cfg.CORSAllowedOrigins[0]
 	}
 
 	accessTTL, err := durationOr("ACCESS_TOKEN_TTL", 15*time.Minute)
@@ -87,6 +128,24 @@ func Load(envFile string) (*Config, error) {
 		return nil, err
 	}
 	cfg.SearchFallbackThreshold = threshold
+
+	resetTTL, err := durationOr("PASSWORD_RESET_TTL", 30*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	cfg.PasswordResetTTL = resetTTL
+
+	verifyTTL, err := durationOr("EMAIL_VERIFICATION_TTL", 24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	cfg.EmailVerificationTTL = verifyTTL
+
+	smtpPort, err := intOr("SMTP_PORT", 587)
+	if err != nil {
+		return nil, err
+	}
+	cfg.SMTPPort = smtpPort
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -121,6 +180,38 @@ func (c *Config) validate() error {
 		if !validOrigin(origin) {
 			return fmt.Errorf("config: CORS_ALLOWED_ORIGINS contiene un origen inválido (%q): se espera http(s)://host[:puerto], sin ruta ni comodines", origin)
 		}
+	}
+	return c.validateMail()
+}
+
+// validateMail comprueba la configuración de los correos de cuenta.
+func (c *Config) validateMail() error {
+	if !validOrigin(c.FrontendURL) {
+		return fmt.Errorf("config: FRONTEND_URL inválida (%q): se espera http(s)://host[:puerto], sin ruta", c.FrontendURL)
+	}
+	if c.PasswordResetTTL <= 0 || c.EmailVerificationTTL <= 0 {
+		return fmt.Errorf("config: PASSWORD_RESET_TTL y EMAIL_VERIFICATION_TTL deben ser positivos")
+	}
+	switch c.MailDriver {
+	case MailDriverLog:
+		return nil
+	case MailDriverSMTP:
+	default:
+		return fmt.Errorf("config: MAIL_DRIVER debe ser %q o %q (actual: %q)", MailDriverLog, MailDriverSMTP, c.MailDriver)
+	}
+	if c.MailFrom == "" || c.SMTPHost == "" {
+		return fmt.Errorf("config: MAIL_DRIVER=smtp requiere MAIL_FROM y SMTP_HOST")
+	}
+	if _, err := mail.ParseAddress(c.MailFrom); err != nil {
+		return fmt.Errorf("config: MAIL_FROM inválido (%q): %w", c.MailFrom, err)
+	}
+	if c.SMTPPort <= 0 || c.SMTPPort > 65535 {
+		return fmt.Errorf("config: SMTP_PORT inválido (%d)", c.SMTPPort)
+	}
+	switch c.SMTPTLS {
+	case "starttls", "tls", "none":
+	default:
+		return fmt.Errorf("config: SMTP_TLS debe ser starttls, tls o none (actual: %q)", c.SMTPTLS)
 	}
 	return nil
 }
@@ -158,6 +249,20 @@ func durationOr(key string, fallback time.Duration) (time.Duration, error) {
 		return 0, fmt.Errorf("config: %s inválida (%q): %w", key, v, err)
 	}
 	return d, nil
+}
+
+// intOr parsea un entero o devuelve el fallback si la variable no está
+// definida.
+func intOr(key string, fallback int) (int, error) {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("config: %s inválida (%q): %w", key, v, err)
+	}
+	return n, nil
 }
 
 // floatOr parsea un número decimal o devuelve el fallback si la variable no

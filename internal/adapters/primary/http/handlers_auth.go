@@ -171,6 +171,8 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusUnauthorized, "refresh token reutilizado; sesión revocada")
 	case errors.Is(err, domain.ErrInvalidRefresh):
 		writeError(w, http.StatusUnauthorized, "refresh token inválido")
+	case errors.Is(err, domain.ErrInvalidEmailToken):
+		writeError(w, http.StatusUnauthorized, "token inválido o expirado")
 	case errors.Is(err, domain.ErrUserAlreadyExists):
 		writeError(w, http.StatusConflict, "el email o el username ya están registrados")
 	case errors.Is(err, domain.ErrNotFound):

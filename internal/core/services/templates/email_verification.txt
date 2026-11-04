@@ -1,0 +1,9 @@
+Hola, {{.Name}}:
+
+Confirma que esta dirección de correo es tuya para terminar de configurar tu cuenta de JunkBox:
+
+{{.Link}}
+
+El enlace caduca en {{.TTL}}.
+
+Si no creaste una cuenta, ignora este correo.

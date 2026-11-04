@@ -15,8 +15,10 @@ import (
 	httpapi "github.com/xcxsar/junkbox-backend/internal/adapters/primary/http"
 	chimw "github.com/xcxsar/junkbox-backend/internal/adapters/primary/http/middleware"
 	"github.com/xcxsar/junkbox-backend/internal/adapters/secondary/freqblog"
+	"github.com/xcxsar/junkbox-backend/internal/adapters/secondary/logmailer"
 	"github.com/xcxsar/junkbox-backend/internal/adapters/secondary/postgres"
 	"github.com/xcxsar/junkbox-backend/internal/adapters/secondary/security"
+	"github.com/xcxsar/junkbox-backend/internal/adapters/secondary/smtp"
 	"github.com/xcxsar/junkbox-backend/internal/adapters/secondary/spotify"
 	"github.com/xcxsar/junkbox-backend/internal/core/ports"
 	"github.com/xcxsar/junkbox-backend/internal/core/services"
@@ -67,6 +69,25 @@ func runServer(cmd *cobra.Command) {
 	revocationChecker := chimw.NewRevocationChecker(queries)
 	authSvc := services.NewAuthService(queries, queries, queries, hasher, jwtManager, cfg.RefreshTTL)
 
+	// 3b. Correos de cuenta (recuperación de contraseña y verificación): se
+	// encolan en email_outbox y un worker los envía con reintentos.
+	mailer, err := newMailer(cfg)
+	if err != nil {
+		fatalf("correo: %v", err)
+	}
+	accountSvc := services.NewAccountEmailService(queries, queries, postgres.NewAccountTx(db), hasher, services.AccountEmailConfig{
+		FrontendURL: cfg.FrontendURL,
+		ResetTTL:    cfg.PasswordResetTTL,
+		VerifyTTL:   cfg.EmailVerificationTTL,
+	})
+	authSvc.SetVerificationSender(accountSvc)
+	outboxWorker := services.NewEmailOutboxWorker(postgres.NewOutboxStore(db), mailer, services.EmailOutboxWorkerConfig{})
+	outboxDone := make(chan struct{})
+	go func() {
+		defer close(outboxDone)
+		outboxWorker.Run(ctx)
+	}()
+
 	// 4. Catálogo musical: Spotify como respaldo de la búsqueda y worker de
 	// embeddings con FreqBlog. Ambos son opcionales.
 	var provider ports.MusicProvider
@@ -91,13 +112,14 @@ func runServer(cmd *cobra.Command) {
 	}
 	musicSvc := services.NewMusicService(queries, postgres.NewCatalogImporter(db), provider, queue, cfg.SearchFallbackThreshold)
 
-	// 5. Purga periódica de la denylist de access tokens expirados.
+	// 5. Purga periódica de la denylist, los tokens de correo y el outbox.
 	go purgeRevokedTokens(ctx, queries)
 
 	// 6. Router y servidor HTTP con shutdown elegante.
 	handler := httpapi.NewRouter(httpapi.RouterOptions{
 		Auth:           httpapi.NewAuthHandler(authSvc, jwtManager),
 		Music:          httpapi.NewMusicHandler(musicSvc),
+		Account:        httpapi.NewAccountHandler(accountSvc),
 		JWT:            jwtManager,
 		Revocation:     revocationChecker,
 		AllowedOrigins: cfg.CORSAllowedOrigins,
@@ -124,11 +146,13 @@ func runServer(cmd *cobra.Command) {
 	}
 	// El worker termina de guardar su último lote antes de cerrar el pool.
 	<-workerDone
+	<-outboxDone
 	log.Println("servidor detenido")
 }
 
 // purgeRevokedTokens borra periódicamente los access tokens revocados que
-// ya expiraron (no aportan nada una vez pasado su exp). Se detiene con ctx.
+// ya expiraron (no aportan nada una vez pasado su exp), los tokens de correo
+// vencidos y los correos ya resueltos del outbox. Se detiene con ctx.
 func purgeRevokedTokens(ctx context.Context, q *sqlc.Queries) {
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
@@ -137,14 +161,36 @@ func purgeRevokedTokens(ctx context.Context, q *sqlc.Queries) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			n, err := q.PurgeExpiredRevokedTokens(ctx)
-			if err != nil {
-				log.Printf("purga de tokens revocados: %v", err)
-				continue
-			}
-			if n > 0 {
-				log.Printf("purga de tokens revocados: %d filas eliminadas", n)
-			}
+			purge(ctx, "tokens revocados", q.PurgeExpiredRevokedTokens)
+			purge(ctx, "tokens de correo expirados", q.PurgeExpiredEmailTokens)
+			purge(ctx, "outbox de correo", q.PurgeOldOutbox)
 		}
 	}
+}
+
+func purge(ctx context.Context, what string, fn func(context.Context) (int64, error)) {
+	n, err := fn(ctx)
+	if err != nil {
+		log.Printf("purga de %s: %v", what, err)
+		return
+	}
+	if n > 0 {
+		log.Printf("purga de %s: %d filas eliminadas", what, n)
+	}
+}
+
+// newMailer construye el driver de correo elegido en MAIL_DRIVER.
+func newMailer(cfg *config.Config) (ports.Mailer, error) {
+	if cfg.MailDriver != config.MailDriverSMTP {
+		log.Println("aviso: MAIL_DRIVER=log; los correos se escriben en la consola y no se envían")
+		return logmailer.Mailer{}, nil
+	}
+	return smtp.New(smtp.Config{
+		Host:     cfg.SMTPHost,
+		Port:     cfg.SMTPPort,
+		Username: cfg.SMTPUsername,
+		Password: cfg.SMTPPassword,
+		From:     cfg.MailFrom,
+		TLS:      cfg.SMTPTLS,
+	})
 }

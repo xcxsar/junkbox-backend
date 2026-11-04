@@ -6,10 +6,54 @@ package sqlc
 
 import (
 	"database/sql"
+	"database/sql/driver"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 )
+
+type EmailTokenPurpose string
+
+const (
+	EmailTokenPurposePasswordReset     EmailTokenPurpose = "password_reset"
+	EmailTokenPurposeEmailVerification EmailTokenPurpose = "email_verification"
+)
+
+func (e *EmailTokenPurpose) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = EmailTokenPurpose(s)
+	case string:
+		*e = EmailTokenPurpose(s)
+	default:
+		return fmt.Errorf("unsupported scan type for EmailTokenPurpose: %T", src)
+	}
+	return nil
+}
+
+type NullEmailTokenPurpose struct {
+	EmailTokenPurpose EmailTokenPurpose `json:"email_token_purpose"`
+	Valid             bool              `json:"valid"` // Valid is true if EmailTokenPurpose is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullEmailTokenPurpose) Scan(value interface{}) error {
+	if value == nil {
+		ns.EmailTokenPurpose, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.EmailTokenPurpose.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullEmailTokenPurpose) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.EmailTokenPurpose), nil
+}
 
 type Album struct {
 	ID          uuid.UUID      `json:"id"`
@@ -34,6 +78,20 @@ type Artist struct {
 	ImageUrl   sql.NullString `json:"image_url"`
 	CreatedAt  time.Time      `json:"created_at"`
 	UpdatedAt  time.Time      `json:"updated_at"`
+}
+
+type EmailOutbox struct {
+	ID            uuid.UUID      `json:"id"`
+	ToAddress     string         `json:"to_address"`
+	Subject       string         `json:"subject"`
+	TextBody      string         `json:"text_body"`
+	HtmlBody      string         `json:"html_body"`
+	Attempts      int32          `json:"attempts"`
+	NextAttemptAt time.Time      `json:"next_attempt_at"`
+	SentAt        sql.NullTime   `json:"sent_at"`
+	FailedAt      sql.NullTime   `json:"failed_at"`
+	LastError     sql.NullString `json:"last_error"`
+	CreatedAt     time.Time      `json:"created_at"`
 }
 
 type RefreshToken struct {
@@ -87,17 +145,28 @@ type SongMetadatum struct {
 }
 
 type User struct {
-	ID             uuid.UUID      `json:"id"`
-	Username       string         `json:"username"`
-	Email          string         `json:"email"`
-	HashedPassword string         `json:"hashed_password"`
-	DisplayName    sql.NullString `json:"display_name"`
-	AvatarUrl      sql.NullString `json:"avatar_url"`
-	CreatedAt      time.Time      `json:"created_at"`
-	UpdatedAt      time.Time      `json:"updated_at"`
+	ID              uuid.UUID      `json:"id"`
+	Username        string         `json:"username"`
+	Email           string         `json:"email"`
+	HashedPassword  string         `json:"hashed_password"`
+	DisplayName     sql.NullString `json:"display_name"`
+	AvatarUrl       sql.NullString `json:"avatar_url"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+	EmailVerifiedAt sql.NullTime   `json:"email_verified_at"`
 }
 
 type UserAccessRevocation struct {
 	UserID        uuid.UUID `json:"user_id"`
 	RevokedBefore time.Time `json:"revoked_before"`
+}
+
+type UserEmailToken struct {
+	ID        uuid.UUID         `json:"id"`
+	UserID    uuid.UUID         `json:"user_id"`
+	Purpose   EmailTokenPurpose `json:"purpose"`
+	TokenHash string            `json:"token_hash"`
+	ExpiresAt time.Time         `json:"expires_at"`
+	UsedAt    sql.NullTime      `json:"used_at"`
+	CreatedAt time.Time         `json:"created_at"`
 }

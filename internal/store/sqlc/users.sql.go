@@ -19,7 +19,7 @@ INSERT INTO users (
 ) VALUES (
     $1, $2, $3, $4, $5
 )
-RETURNING id, username, email, display_name, avatar_url, created_at, updated_at
+RETURNING id, username, email, display_name, avatar_url, created_at, updated_at, email_verified_at
 `
 
 type CreateUserParams struct {
@@ -31,13 +31,14 @@ type CreateUserParams struct {
 }
 
 type CreateUserRow struct {
-	ID          uuid.UUID      `json:"id"`
-	Username    string         `json:"username"`
-	Email       string         `json:"email"`
-	DisplayName sql.NullString `json:"display_name"`
-	AvatarUrl   sql.NullString `json:"avatar_url"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
+	ID              uuid.UUID      `json:"id"`
+	Username        string         `json:"username"`
+	Email           string         `json:"email"`
+	DisplayName     sql.NullString `json:"display_name"`
+	AvatarUrl       sql.NullString `json:"avatar_url"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+	EmailVerifiedAt sql.NullTime   `json:"email_verified_at"`
 }
 
 func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error) {
@@ -57,6 +58,7 @@ func (q *Queries) CreateUser(ctx context.Context, arg CreateUserParams) (CreateU
 		&i.AvatarUrl,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.EmailVerifiedAt,
 	)
 	return i, err
 }
@@ -81,7 +83,7 @@ func (q *Queries) ExistsUserByEmailOrUsername(ctx context.Context, arg ExistsUse
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, username, email, hashed_password, display_name, avatar_url, created_at, updated_at
+SELECT id, username, email, hashed_password, display_name, avatar_url, created_at, updated_at, email_verified_at
 FROM users
 WHERE email = $1
 `
@@ -98,12 +100,13 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (User, error
 		&i.AvatarUrl,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.EmailVerifiedAt,
 	)
 	return i, err
 }
 
 const getUserByID = `-- name: GetUserByID :one
-SELECT id, username, email, hashed_password, display_name, avatar_url, created_at, updated_at
+SELECT id, username, email, hashed_password, display_name, avatar_url, created_at, updated_at, email_verified_at
 FROM users
 WHERE id = $1
 `
@@ -120,12 +123,13 @@ func (q *Queries) GetUserByID(ctx context.Context, id uuid.UUID) (User, error) {
 		&i.AvatarUrl,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.EmailVerifiedAt,
 	)
 	return i, err
 }
 
 const getUserByUsername = `-- name: GetUserByUsername :one
-SELECT id, username, email, hashed_password, display_name, avatar_url, created_at, updated_at
+SELECT id, username, email, hashed_password, display_name, avatar_url, created_at, updated_at, email_verified_at
 FROM users
 WHERE username = $1
 `
@@ -142,6 +146,34 @@ func (q *Queries) GetUserByUsername(ctx context.Context, username string) (User,
 		&i.AvatarUrl,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.EmailVerifiedAt,
 	)
 	return i, err
+}
+
+const markEmailVerified = `-- name: MarkEmailVerified :exec
+UPDATE users
+SET email_verified_at = COALESCE(email_verified_at, NOW())
+WHERE id = $1
+`
+
+func (q *Queries) MarkEmailVerified(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, markEmailVerified, id)
+	return err
+}
+
+const updateUserPassword = `-- name: UpdateUserPassword :exec
+UPDATE users
+SET hashed_password = $2
+WHERE id = $1
+`
+
+type UpdateUserPasswordParams struct {
+	ID             uuid.UUID `json:"id"`
+	HashedPassword string    `json:"hashed_password"`
+}
+
+func (q *Queries) UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error {
+	_, err := q.db.ExecContext(ctx, updateUserPassword, arg.ID, arg.HashedPassword)
+	return err
 }

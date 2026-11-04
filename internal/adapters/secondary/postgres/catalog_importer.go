@@ -149,18 +149,12 @@ func (c *CatalogImporter) ImportAlbums(ctx context.Context, albums []domain.Impo
 }
 
 func (c *CatalogImporter) inTx(ctx context.Context, fn func(q *sqlc.Queries) error) error {
-	tx, err := c.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("postgres: iniciar transacción: %w", err)
-	}
-	if err := fn(sqlc.New(tx)); err != nil {
-		_ = tx.Rollback()
-		return fmt.Errorf("postgres: importar catálogo: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("postgres: confirmar transacción: %w", err)
-	}
-	return nil
+	return runInTx(ctx, c.db, func(q *sqlc.Queries) error {
+		if err := fn(q); err != nil {
+			return fmt.Errorf("postgres: importar catálogo: %w", err)
+		}
+		return nil
+	})
 }
 
 // upsertArtist resuelve el artista en tres pasos: (1) ya existe con ese

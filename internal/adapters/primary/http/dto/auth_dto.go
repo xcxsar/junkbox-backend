@@ -31,6 +31,28 @@ type LogoutRequest struct {
 	AllSessions bool `json:"all_sessions,omitempty"`
 }
 
+// ForgotPasswordRequest es el cuerpo de POST /api/v1/auth/password/forgot.
+type ForgotPasswordRequest struct {
+	Email string `json:"email"`
+}
+
+// ResetPasswordRequest es el cuerpo de POST /api/v1/auth/password/reset.
+type ResetPasswordRequest struct {
+	Token    string `json:"token"`
+	Password string `json:"password"`
+}
+
+// VerifyEmailRequest es el cuerpo de POST /api/v1/auth/email/verify.
+type VerifyEmailRequest struct {
+	Token string `json:"token"`
+}
+
+// MessageResponse es la respuesta de los endpoints que solo confirman una
+// acción.
+type MessageResponse struct {
+	Message string `json:"message"`
+}
+
 // AuthResponse es la respuesta de register y login.
 type AuthResponse struct {
 	AccessToken  string              `json:"access_token"`

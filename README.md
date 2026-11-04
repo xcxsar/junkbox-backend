@@ -115,6 +115,11 @@ cp .env.template .env
 - `FREQBLOG_API_KEY` (opcional): clave de [FreqBlog](https://freqblog.com), de donde salen los audio features de las canciones importadas desde Spotify. Spotify cerró `/v1/audio-features` para apps nuevas en noviembre de 2024. Sin la clave, esas canciones quedan sin embedding (`pending_embedding: true`). El plan gratuito incluye 1.000 canciones resueltas al mes.
 - `SEARCH_FALLBACK_THRESHOLD` (opcional, por defecto `0.8`): puntaje mínimo (`strict_word_similarity`, de 0 a 1) del mejor resultado local para no consultar Spotify.
 - `CORS_ALLOWED_ORIGINS` (opcional, por defecto `http://localhost:5173`): orígenes del frontend, separados por coma, que pueden llamar a la API desde el navegador. Cada uno debe ser `http(s)://host[:puerto]` exacto, sin `/` final ni comodines; cualquier otro origen se rechaza.
+- `FRONTEND_URL` (opcional, por defecto el primer origen de `CORS_ALLOWED_ORIGINS`): origen del frontend al que apuntan los enlaces de los correos (`/restablecer-contrasena#token=…` y `/verificar-correo#token=…`).
+- `PASSWORD_RESET_TTL` / `EMAIL_VERIFICATION_TTL` (opcionales, por defecto `30m` y `24h`): vigencia de los enlaces de recuperación y de verificación.
+- `MAIL_DRIVER` (opcional, por defecto `log`): `log` escribe los correos en la consola sin enviarlos; `smtp` los envía con la configuración `SMTP_*`.
+- `MAIL_FROM` (obligatorio con `smtp`): remitente, p. ej. `JunkBox <no-reply@tu-dominio>`.
+- `SMTP_HOST`, `SMTP_PORT` (por defecto `587`), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_TLS` (`starttls` por defecto, `tls` o `none`): servidor SMTP. La plantilla trae activos los valores de Mailpit y comentados los de Resend.
 
 > `.env` contiene secretos locales y está ignorado en Git mediante `.gitignore`.
 
@@ -132,7 +137,7 @@ Todas las tareas operativas se gestionan desde la raíz del proyecto a través d
   ```bash
   make db-up
   ```
-  *(Espera a que el healthcheck de PostgreSQL confirme disponibilidad antes de devolver el control)*.
+  *(Espera a que el healthcheck de PostgreSQL confirme disponibilidad antes de devolver el control)*. También levanta **Mailpit**, un servidor SMTP falso que atrapa los correos del backend: no salen a Internet y se ven en http://localhost:8025.
 
 - **Detener base de datos:**
   ```bash
@@ -272,6 +277,16 @@ make seed-up                  # 4 usuarios del equipo, contraseña Password123!
 make run-server
 ```
 
+### Correos en producción (Resend)
+
+En desarrollo los correos llegan a Mailpit (http://localhost:8025). Para enviarlos de verdad con [Resend](https://resend.com):
+
+1. Verifica tu dominio en **Resend → Domains** y añade en su DNS los registros que indique (SPF y DKIM, de tipo `TXT`, y el `MX` del subdominio de envío).
+2. Crea una API key con permiso solo de envío (**Sending access**).
+3. En `.env`, comenta el bloque de Mailpit y descomenta el de Resend: `SMTP_HOST="smtp.resend.com"`, `SMTP_PORT=587`, `SMTP_USERNAME="resend"`, `SMTP_PASSWORD` con la API key, `SMTP_TLS="starttls"` y `MAIL_FROM` con una dirección de tu dominio.
+
+Los correos se guardan en la tabla `email_outbox` dentro de la misma transacción que crea el token, y un worker los envía con reintentos (backoff de 30 s, 1 min, 2 min…; se descartan tras 5 intentos). Si el proveedor no está disponible, se entregan cuando vuelve.
+
 ---
 
 ## API REST
@@ -290,6 +305,10 @@ El backend utiliza tokens de acceso **JWT HS256** (15 minutos de vigencia) con c
 | `POST` | `/api/v1/auth/refresh` | Bearer | Rotación e intercambio seguro de refresh token |
 | `GET` | `/api/v1/auth/me` | Bearer | Consulta del perfil del usuario autenticado |
 | `POST` | `/api/v1/auth/logout` | Bearer | Cierre de sesión y revocación en denylist |
+| `POST` | `/api/v1/auth/password/forgot` | — | Solicitud de enlace de recuperación de contraseña |
+| `POST` | `/api/v1/auth/password/reset` | Token del correo | Restablecimiento de contraseña con el enlace recibido |
+| `POST` | `/api/v1/auth/email/verify` | Token del correo | Verificación del correo electrónico |
+| `POST` | `/api/v1/auth/email/verify/resend` | Bearer | Reenvío del enlace de verificación |
 | `GET` | `/api/v1/music/search` | Bearer | Búsqueda difusa en catálogo local con fallback a Spotify |
 | `GET` | `/api/v1/music/tracks/{id}` | Bearer | Detalle de canción, métricas acústicas y estado de embedding |
 | `GET` | `/api/v1/music/artists/{id}` | Bearer | Detalle de artista y catálogo relacionado |
@@ -347,6 +366,7 @@ curl -i -X POST http://localhost:8080/api/v1/auth/register \
     "email": "melomano@junkbox.local",
     "display_name": "Crítico Musical",
     "avatar_url": "https://api.dicebear.com/7.x/bottts/svg?seed=melomano",
+    "email_verified": false,
     "created_at": "2026-10-31T12:00:00Z"
   }
 }
@@ -382,6 +402,8 @@ curl -i -X POST http://localhost:8080/api/v1/auth/login \
     "email": "cesar@junkbox.local",
     "display_name": "César David Beltrán Loredo",
     "avatar_url": "https://api.dicebear.com/7.x/bottts/svg?seed=cesar",
+  "email_verified": true,
+    "email_verified": true,
     "created_at": "2026-10-27T00:00:00Z"
   }
 }
@@ -463,7 +485,82 @@ curl -i -X POST http://localhost:8080/api/v1/auth/logout \
 
 ---
 
-#### 7. Búsqueda de Música (`GET /api/v1/music/search`)
+#### 7. Recuperación de Contraseña (`POST /api/v1/auth/password/forgot`)
+Envía un enlace de recuperación al correo si pertenece a una cuenta. Responde **siempre** igual, exista o no el correo, para no revelar qué cuentas están registradas. Se emiten como máximo 3 enlaces por usuario y hora; uno nuevo invalida los anteriores.
+
+**Cuerpo de la petición (JSON):**
+- `email` (string, obligatorio): Correo de la cuenta.
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/auth/password/forgot \
+  -H "Content-Type: application/json" \
+  -d '{ "email": "cesar@junkbox.local" }'
+```
+
+**Respuesta (`200 OK`):**
+```json
+{
+  "message": "Si el correo está registrado, recibirás un enlace para restablecer tu contraseña."
+}
+```
+
+El correo lleva un enlace a `FRONTEND_URL/restablecer-contrasena#token=…`, válido 30 minutos y de un solo uso. El token va en el fragmento (`#`) para que no llegue a logs de servidor ni al `Referer`; el frontend lo lee y lo envía al endpoint siguiente.
+
+---
+
+#### 8. Restablecimiento de Contraseña (`POST /api/v1/auth/password/reset`)
+Cambia la contraseña con el token del enlace. Además, marca el correo como verificado, **cierra todas las sesiones** del usuario (refresh tokens y access tokens) y le envía un aviso de que su contraseña cambió.
+
+**Cuerpo de la petición (JSON):**
+- `token` (string, obligatorio): Token del enlace del correo.
+- `password` (string, obligatorio): Nueva contraseña, con las mismas reglas que en el registro.
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/auth/password/reset \
+  -H "Content-Type: application/json" \
+  -d '{ "token": "FU76CQGYHVzfD3R7KObJ...", "password": "NuevaClave9$" }'
+```
+
+**Respuestas:**
+- `200 OK`: `{ "message": "Contraseña actualizada. Inicia sesión de nuevo." }`
+- `400 Bad Request`: la contraseña no cumple las reglas. El token no se consume.
+- `401 Unauthorized`: `{ "error": "token inválido o expirado" }` (no existe, ya se usó o caducó).
+
+---
+
+#### 9. Verificación de Correo (`POST /api/v1/auth/email/verify`)
+Al registrarse, el usuario recibe un enlace a `FRONTEND_URL/verificar-correo#token=…`, válido 24 horas. La verificación **no bloquea** el inicio de sesión: el estado se expone como `email_verified` en el perfil.
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/auth/email/verify \
+  -H "Content-Type: application/json" \
+  -d '{ "token": "r7Bi4G3vwt..." }'
+```
+
+**Respuestas:**
+- `200 OK`: `{ "message": "Correo verificado." }`
+- `401 Unauthorized`: `{ "error": "token inválido o expirado" }`
+
+---
+
+#### 10. Reenvío de Verificación (`POST /api/v1/auth/email/verify/resend`)
+Envía un nuevo enlace de verificación al usuario autenticado. Si ya está verificado, o si superó el límite de 3 enlaces por hora, responde igual sin enviar nada.
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/auth/email/verify/resend \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+**Respuesta (`200 OK`):**
+```json
+{
+  "message": "Si tu correo aún no está verificado, recibirás un nuevo enlace."
+}
+```
+
+---
+
+#### 11. Búsqueda de Música (`GET /api/v1/music/search`)
 Busca por coincidencia difusa de palabras (`pg_trgm`, `strict_word_similarity` sobre "título + artista") en la base de datos local.
 
 Consulta a Spotify si no hay resultados locales o si el mejor puntaje es menor que `SEARCH_FALLBACK_THRESHOLD` (0.8). En ese caso guarda las canciones, artistas y álbumes en PostgreSQL y encola las canciones nuevas para calcular su vector de recomendaciones en segundo plano.
@@ -542,7 +639,7 @@ curl -i -X GET "http://localhost:8080/api/v1/music/search?q=Espresso%20Sabrina%2
 
 ---
 
-#### 8. Detalle de Canción (`GET /api/v1/music/tracks/{id}`)
+#### 12. Detalle de Canción (`GET /api/v1/music/tracks/{id}`)
 Devuelve los metadatos completos de una canción: atributos acústicos y si ya tiene vector de recomendación (`has_embedding`).
 
 El parámetro `{id}` puede ser el ID de Spotify o el ID entero local. `audio_features` es `null` mientras la canción no tenga ninguno.
@@ -590,7 +687,7 @@ curl -i -X GET "http://localhost:8080/api/v1/music/tracks/2qSkXiYOKEzfk3vhRpIQUR
 
 ---
 
-#### 9. Detalle de Artista (`GET /api/v1/music/artists/{id}`)
+#### 13. Detalle de Artista (`GET /api/v1/music/artists/{id}`)
 Obtiene los datos del artista (géneros, popularidad, imagen) por ID de Spotify o UUID local. Los artistas que vienen del CSV no tienen `spotify_id` hasta que una búsqueda en Spotify los "reclama" por nombre. `popularity` es `null` si Spotify no la envía.
 
 ```bash
@@ -613,7 +710,7 @@ curl -i -X GET "http://localhost:8080/api/v1/music/artists/74KM79TiuVKeVCqs8QtB0
 
 ---
 
-#### 10. Detalle de Álbum (`GET /api/v1/music/albums/{id}`)
+#### 14. Detalle de Álbum (`GET /api/v1/music/albums/{id}`)
 Obtiene los datos del álbum, su carátula, su artista y sus pistas (las que ya están en el catálogo local), por ID de Spotify o UUID local.
 
 ```bash
@@ -665,10 +762,10 @@ Todas las respuestas con error devuelven formato JSON uniforme:
 ```
 
 - `400 Bad Request`: parámetros faltantes, JSON malformado o campos con formato inválido (p. ej. `type` distinto de `track`/`artist`/`album`, `limit` fuera de 1–50 o un `{id}` que no es ni un ID local ni un ID de Spotify).
-- `401 Unauthorized`: Token ausente, firma expirada, token en denylist o refresh token ya utilizado.
+- `401 Unauthorized`: Token ausente, firma expirada, token en denylist, refresh token ya utilizado, o token de correo (recuperación/verificación) inválido, usado o expirado.
 - `404 Not Found`: Canción, artista o álbum no encontrado.
 - `409 Conflict`: `username` o `email` ya registrado.
 - `500 Internal Server Error`: fallo de conexión con la base de datos u otro error interno.
 - `502 Bad Gateway`: no hay resultados locales y Spotify falló (`servicio de música no disponible`).
 
-Para una guía de verificación completa paso a paso con scripts automatizados de prueba, consulta [`implementacion.md`](implementacion.md#5-guía-de-verificación-y-pruebas-con-curl).
+Para una guía de verificación completa paso a paso con scripts automatizados de prueba, consulta [`implementacion.md`](implementacion.md#6-guía-de-verificación-y-pruebas-con-curl).

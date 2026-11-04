@@ -14,7 +14,10 @@ import (
 type RouterOptions struct {
 	Auth  *AuthHandler
 	Music *MusicHandler
-	JWT   chimw.JWTValidator
+	// Account expone recuperación de contraseña y verificación de correo.
+	// Si es nil, esas rutas no se montan.
+	Account *AccountHandler
+	JWT     chimw.JWTValidator
 	// Revocation comprueba la denylist y el corte global en cada petición
 	// autenticada. Si es nil, se omite la comprobación (tests).
 	Revocation chimw.TokenRevocation
@@ -41,6 +44,13 @@ func NewRouter(opts RouterOptions) http.Handler {
 		r.Post("/auth/register", opts.Auth.Register)
 		r.Post("/auth/login", opts.Auth.Login)
 		r.Post("/auth/refresh", opts.Auth.Refresh)
+		if opts.Account != nil {
+			// Sin Bearer: quien olvidó su contraseña no tiene sesión. reset y
+			// verify se autentican con el token de un solo uso del correo.
+			r.Post("/auth/password/forgot", opts.Account.ForgotPassword)
+			r.Post("/auth/password/reset", opts.Account.ResetPassword)
+			r.Post("/auth/email/verify", opts.Account.VerifyEmail)
+		}
 
 		// Endpoints protegidos (logout necesita el access token para
 		// revocarlo en la denylist).
@@ -48,6 +58,9 @@ func NewRouter(opts RouterOptions) http.Handler {
 			r.Use(chimw.AuthMiddleware(opts.JWT, opts.Revocation))
 			r.Get("/auth/me", opts.Auth.Me)
 			r.Post("/auth/logout", opts.Auth.Logout)
+			if opts.Account != nil {
+				r.Post("/auth/email/verify/resend", opts.Account.ResendVerification)
+			}
 
 			if opts.Music != nil {
 				r.Get("/music/search", opts.Music.Search)

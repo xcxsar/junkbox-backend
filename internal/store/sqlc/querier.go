@@ -16,8 +16,16 @@ type Querier interface {
 	// ClaimArtistByName asigna el spotify_id a un artista del CSV homónimo
 	// (spotify_id NULL). No devuelve filas si no hay ninguno libre.
 	ClaimArtistByName(ctx context.Context, arg ClaimArtistByNameParams) (uuid.UUID, error)
+	// ClaimDueEmails bloquea los pendientes vencidos; SKIP LOCKED evita que dos
+	// réplicas tomen el mismo correo.
+	ClaimDueEmails(ctx context.Context, limit int32) ([]ClaimDueEmailsRow, error)
+	// ConsumeEmailToken marca el token como usado solo si sigue vigente; al ser
+	// un único UPDATE, dos peticiones concurrentes no pueden consumirlo dos veces.
+	ConsumeEmailToken(ctx context.Context, arg ConsumeEmailTokenParams) (uuid.UUID, error)
+	CountRecentEmailTokens(ctx context.Context, arg CountRecentEmailTokensParams) (int64, error)
 	CountSongs(ctx context.Context) (int64, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
+	EnqueueEmail(ctx context.Context, arg EnqueueEmailParams) error
 	ExistsUserByEmailOrUsername(ctx context.Context, arg ExistsUserByEmailOrUsernameParams) (bool, error)
 	GetAlbum(ctx context.Context, arg GetAlbumParams) (GetAlbumRow, error)
 	GetArtist(ctx context.Context, arg GetArtistParams) (GetArtistRow, error)
@@ -35,15 +43,24 @@ type Querier interface {
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (User, error)
 	GetUserByUsername(ctx context.Context, username string) (User, error)
+	InsertEmailToken(ctx context.Context, arg InsertEmailTokenParams) error
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
+	InvalidateEmailTokens(ctx context.Context, arg InvalidateEmailTokensParams) error
 	IsAccessTokenRevoked(ctx context.Context, jti uuid.UUID) (bool, error)
 	// --- Worker de embeddings ---
 	ListPendingEmbeddingTracks(ctx context.Context, arg ListPendingEmbeddingTracksParams) ([]ListPendingEmbeddingTracksRow, error)
 	ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]ListTracksByAlbumRow, error)
+	MarkEmailFailed(ctx context.Context, arg MarkEmailFailedParams) error
+	MarkEmailRetry(ctx context.Context, arg MarkEmailRetryParams) error
+	MarkEmailSent(ctx context.Context, id uuid.UUID) error
+	MarkEmailVerified(ctx context.Context, id uuid.UUID) error
 	// Solo cuenta si embedding_attempts sigue siendo el que vio el worker: un
 	// mismo track que llegó dos veces (cola y rescan) no consume dos intentos.
 	MarkEmbeddingAttemptFailed(ctx context.Context, arg MarkEmbeddingAttemptFailedParams) error
+	PurgeExpiredEmailTokens(ctx context.Context) (int64, error)
 	PurgeExpiredRevokedTokens(ctx context.Context) (int64, error)
+	// PurgeOldOutbox borra los correos ya resueltos: contienen enlaces con token.
+	PurgeOldOutbox(ctx context.Context) (int64, error)
 	RevokeAccessToken(ctx context.Context, arg RevokeAccessTokenParams) error
 	RevokeAllRefreshTokensByUser(ctx context.Context, userID uuid.UUID) error
 	RevokeAllUserAccessTokens(ctx context.Context, userID uuid.UUID) error
@@ -64,6 +81,7 @@ type Querier interface {
 	SearchTracksTrigram(ctx context.Context, arg SearchTracksTrigramParams) ([]SearchTracksTrigramRow, error)
 	SetRefreshTokenReplacedBy(ctx context.Context, arg SetRefreshTokenReplacedByParams) error
 	UpdateSongAudioFeaturesAndEmbedding(ctx context.Context, arg UpdateSongAudioFeaturesAndEmbeddingParams) (int64, error)
+	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
 	UpsertAlbum(ctx context.Context, arg UpsertAlbumParams) (uuid.UUID, error)
 	// Los artistas simplificados de una búsqueda de canciones no traen géneros,
 	// popularidad ni imagen: en conflicto no se pisan los valores conocidos.

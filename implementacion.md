@@ -34,7 +34,13 @@ Este documento establece la especificación técnica, diseño de arquitectura y 
   - [4.5 Worker de Embeddings con FreqBlog](#45-worker-de-embeddings-con-freqblog)
   - [4.6 Núcleo: `MusicService`](#46-núcleo-musicservice)
   - [4.7 Adaptadores HTTP Chi: Endpoints de Música Protegidos con JWT](#47-adaptadores-http-chi-endpoints-de-música-protegidos-con-jwt)
-- [5. Guía de Verificación y Pruebas con cURL](#5-guía-de-verificación-y-pruebas-con-curl)
+- [5. AUTH-02: Recuperación de Contraseña y Verificación de Correo](#5-auth-02-recuperación-de-contraseña-y-verificación-de-correo)
+  - [5.1 Contrato HTTP](#51-contrato-http)
+  - [5.2 Esquema: `create_user_email_tokens_and_outbox`](#52-esquema-create_user_email_tokens_and_outbox)
+  - [5.3 Flujos](#53-flujos)
+  - [5.4 Envío de Correos: Outbox, SMTP, Mailpit y Resend](#54-envío-de-correos-outbox-smtp-mailpit-y-resend)
+  - [5.5 Decisiones](#55-decisiones)
+- [6. Guía de Verificación y Pruebas con cURL](#6-guía-de-verificación-y-pruebas-con-curl)
 
 ---
 
@@ -134,6 +140,16 @@ services:
       retries: 5
       start_period: 20s
 
+  # Servidor SMTP falso para desarrollo: atrapa los correos (no salen a
+  # Internet) y los muestra en http://localhost:8025.
+  mailpit:
+    image: axllent/mailpit:v1.32.0
+    container_name: mailpit-junkbox
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${MAILPIT_SMTP_PORT:-1025}:1025"
+      - "127.0.0.1:${MAILPIT_UI_PORT:-8025}:8025"
+
 volumes:
   postgres-junkbox-data:
     name: postgres-junkbox-data
@@ -184,6 +200,30 @@ SEARCH_FALLBACK_THRESHOLD=0.8
 
 # Orígenes del frontend permitidos por CORS (separados por coma, sin "/" final).
 CORS_ALLOWED_ORIGINS="http://localhost:5173"
+
+# Correos de cuenta (recuperación de contraseña y verificación de email).
+# Origen del frontend al que apuntan los enlaces (default: primer origen de CORS).
+FRONTEND_URL="http://localhost:5173"
+PASSWORD_RESET_TTL="30m"
+EMAIL_VERIFICATION_TTL="24h"
+
+# MAIL_DRIVER: "log" escribe los correos en la consola; "smtp" los envía.
+# Desarrollo con Mailpit (make db-up; bandeja en http://localhost:8025):
+MAIL_DRIVER="smtp"
+MAIL_FROM="JunkBox <no-reply@junkbox.local>"
+SMTP_HOST="localhost"
+SMTP_PORT=1025
+SMTP_USERNAME=""
+SMTP_PASSWORD=""
+SMTP_TLS="none"
+
+# Producción con Resend (dominio verificado en resend.com/domains):
+# MAIL_FROM="JunkBox <no-reply@tu-dominio>"
+# SMTP_HOST="smtp.resend.com"
+# SMTP_PORT=587
+# SMTP_USERNAME="resend"
+# SMTP_PASSWORD="re_tu_api_key"
+# SMTP_TLS="starttls"
 ```
 
 `.env` se obtiene copiando la plantilla. En un entorno limpio basta con cambiar la contraseña y `JWT_SECRET` (las variables de Spotify y FreqBlog son opcionales; ver §4.7); en la máquina con el volumen preexistente `POSTGRES_PASSWORD` y `DATABASE_URL` deben usar la contraseña original (`postgres`).
@@ -1585,7 +1625,76 @@ Las rutas están en el grupo protegido por `AuthMiddleware` (`router.go`), en `h
 
 ---
 
-## 5. Guía de Verificación y Pruebas con cURL
+## 5. AUTH-02: Recuperación de Contraseña y Verificación de Correo
+
+Figma muestra "¿Olvidaste tu contraseña?" en Iniciar sesión, pero no había endpoints de recuperación. Esta fase los añade, junto con la verificación del correo al registrarse.
+
+### 5.1 Contrato HTTP
+
+| Endpoint | Autenticación | Body | Respuestas |
+|---|---|---|---|
+| `POST /auth/password/forgot` | ninguna (máx. 3 enlaces/h por usuario) | `{ "email" }` | Siempre `200 { "message" }`; `400` si falta `email` |
+| `POST /auth/password/reset` | token de recuperación del correo | `{ "token", "password" }` | `200` · `400` contraseña inválida · `401 "token inválido o expirado"` |
+| `POST /auth/email/verify` | token de verificación del correo | `{ "token" }` | `200` · `401 "token inválido o expirado"` |
+| `POST /auth/email/verify/resend` | Bearer | — | `200` (también si ya está verificado o se superó el límite) |
+
+`forgot` no puede exigir credenciales, porque quien la usa no las tiene. `reset` y `verify` se autentican con el token de un solo uso que llega por correo. El perfil (`register`, `login`, `me`) incluye `email_verified`.
+
+### 5.2 Esquema: `create_user_email_tokens_and_outbox`
+
+- `users.email_verified_at TIMESTAMPTZ`. La migración marca como verificadas las cuentas existentes, y el seed también.
+- `user_email_tokens (user_id, purpose, token_hash, expires_at, used_at)`:
+  - `purpose` es el enum `email_token_purpose` (`password_reset` | `email_verification`). Toda consulta filtra por él, así que un token de verificación no sirve para el reset.
+  - Solo se guarda el SHA-256 del token, igual que en `refresh_tokens`.
+  - `ConsumeEmailToken` es un único `UPDATE … WHERE used_at IS NULL AND expires_at > NOW() RETURNING user_id`, así que dos peticiones concurrentes no pueden usar el mismo token.
+- `email_outbox (to_address, subject, text_body, html_body, attempts, next_attempt_at, sent_at, failed_at, last_error)`, con un índice parcial sobre los pendientes.
+
+### 5.3 Flujos
+
+- **forgot** (`AccountEmailService.ForgotPassword`):
+  - Normaliza el email. Si no existe o se superó el límite, no hace nada.
+  - Si no, genera un token aleatorio (64 bytes, base64url) y, en **una transacción** (`postgres.AccountTx.IssueEmailToken`), invalida los enlaces pendientes, guarda el hash y encola el correo.
+  - El handler responde lo mismo incluso ante un error interno, que solo se registra en el log.
+- **reset**:
+  - Valida la contraseña (`validatePassword`) y la hashea con bcrypt.
+  - En una transacción:
+    1. Consume el token.
+    2. Actualiza la contraseña y marca el email como verificado.
+    3. Revoca todos los refresh tokens y aplica el corte global de access tokens (`user_access_revocations`).
+    4. Encola el aviso "Tu contraseña de JunkBox se cambió".
+  - Una contraseña inválida no consume el token.
+- **verificación**:
+  - `AuthService.Register` llama a `SendVerification` tras crear el usuario. Si eso falla, el registro no falla: se puede reenviar.
+  - `verify` consume el token y marca `email_verified_at`.
+  - `resend` emite un enlace nuevo con el mismo límite de 3/h.
+
+Los enlaces son `FRONTEND_URL/restablecer-contrasena#token=…` (30 min) y `FRONTEND_URL/verificar-correo#token=…` (24 h). El token va en el fragmento para que no llegue a logs ni al `Referer`. Las plantillas (texto + HTML) están en `internal/core/services/templates/` y se embeben con `embed`.
+
+### 5.4 Envío de Correos: Outbox, SMTP, Mailpit y Resend
+
+- **Outbox:** `EmailOutboxWorker` toma lotes de 10 cada 5 s con `SELECT … FOR UPDATE SKIP LOCKED`, de modo que varias réplicas no envían el mismo correo.
+  - Si un envío falla, reintenta con backoff de `30 s · 2^(intentos-1)` y lo marca como fallido tras 5 intentos.
+  - La entrega es "al menos una vez": si el proceso muere entre el envío y el commit, el correo se reenvía.
+  - La purga horaria borra los correos resueltos de más de 24 h (contienen enlaces con token) y los tokens expirados.
+- **Drivers** (`MAIL_DRIVER`):
+  - `log` (por defecto): escribe el correo en la consola.
+  - `smtp`: adaptador `internal/adapters/secondary/smtp`, con `wneessen/go-mail`.
+- **Desarrollo:** `make db-up` levanta **Mailpit** (`axllent/mailpit`, SMTP en `127.0.0.1:1025`, bandeja web en http://localhost:8025). La plantilla `.env.template` ya apunta a él.
+- **Producción:** **Resend** por SMTP (`smtp.resend.com:587`, STARTTLS, usuario `resend`, contraseña = API key) con un dominio verificado (SPF/DKIM). Cambiar de proveedor es cambiar variables de entorno.
+
+### 5.5 Decisiones
+
+| Tema | Decisión | Motivo |
+|---|---|---|
+| Proveedor | Resend vía SMTP genérico | Entregabilidad de un proveedor transaccional sin atarse a su API; el mismo adaptador sirve para Mailpit. |
+| Encolado | Outbox en PostgreSQL | Los correos sobreviven a reinicios y caídas del proveedor, y se encolan en la misma transacción que el token. |
+| Verificación | No bloqueante | Bloquear el login complicaría el onboarding. Pendiente de confirmar con Producto. |
+| Reset | Cierra todas las sesiones | Si alguien más tenía acceso a la cuenta, lo pierde. |
+| Pantallas | Pendientes en Figma | "Recuperar contraseña", "Restablecer contraseña" y "Verificar correo" (leen `#token`), y el aviso "verifica tu correo" con botón de reenviar. |
+
+---
+
+## 6. Guía de Verificación y Pruebas con cURL
 
 ### 1. Levantar Contenedor y Aplicar Migraciones
 
@@ -1770,3 +1879,35 @@ make seed-down   # confirmar con y
 ```
 
 _`song_metadata`, `artists` y `albums` conservan sus filas; solo se vacían usuarios y tokens._
+
+### 13. Recuperación de Contraseña con Mailpit
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/auth/password/forgot \
+  -H "Content-Type: application/json" -d '{"email":"cesar@junkbox.local"}'
+```
+
+_Respuesta: `200` con el mensaje genérico. El correo aparece en http://localhost:8025. Un correo inexistente devuelve exactamente lo mismo y no envía nada. Copiar el token del enlace (`#token=…`):_
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/auth/password/reset \
+  -H "Content-Type: application/json" -d '{"token":"<token>","password":"NuevaClave9$"}'
+```
+
+_Resultado esperado:_
+- _Respuesta `200` y llega "Tu contraseña de JunkBox se cambió"._
+- _Reusar el token: `401`._
+- _Login con la contraseña anterior: `401`; con la nueva: `200`._
+- _El access token y el refresh token anteriores quedan revocados (`401`)._
+
+### 14. Verificación de Correo
+
+_Registrar un usuario (§2): `user.email_verified` es `false` y llega "Confirma tu correo de JunkBox". Enviar el token a `POST /api/v1/auth/email/verify`: responde `200`, `GET /auth/me` muestra `email_verified: true` y reusar el token da `401`._
+
+### 15. Reintentos del Outbox
+
+```bash
+docker stop mailpit-junkbox
+curl -s -X POST http://localhost:8080/api/v1/auth/password/forgot -H "Content-Type: application/json" -d '{"email":"cesar@junkbox.local"}'
+docker start mailpit-junkbox   # el correo llega en el siguiente reintento (~30 s)
+```

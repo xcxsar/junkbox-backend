@@ -4,20 +4,20 @@ INSERT INTO users (
 ) VALUES (
     $1, $2, $3, $4, $5
 )
-RETURNING id, username, email, display_name, avatar_url, created_at, updated_at;
+RETURNING id, username, email, display_name, avatar_url, created_at, updated_at, email_verified_at;
 
 -- name: GetUserByEmail :one
-SELECT id, username, email, hashed_password, display_name, avatar_url, created_at, updated_at
+SELECT id, username, email, hashed_password, display_name, avatar_url, created_at, updated_at, email_verified_at
 FROM users
 WHERE email = $1;
 
 -- name: GetUserByUsername :one
-SELECT id, username, email, hashed_password, display_name, avatar_url, created_at, updated_at
+SELECT id, username, email, hashed_password, display_name, avatar_url, created_at, updated_at, email_verified_at
 FROM users
 WHERE username = $1;
 
 -- name: GetUserByID :one
-SELECT id, username, email, hashed_password, display_name, avatar_url, created_at, updated_at
+SELECT id, username, email, hashed_password, display_name, avatar_url, created_at, updated_at, email_verified_at
 FROM users
 WHERE id = $1;
 
@@ -26,3 +26,13 @@ SELECT EXISTS (
     SELECT 1 FROM users
     WHERE email = $1 OR username = $2
 );
+
+-- name: UpdateUserPassword :exec
+UPDATE users
+SET hashed_password = $2
+WHERE id = $1;
+
+-- name: MarkEmailVerified :exec
+UPDATE users
+SET email_verified_at = COALESCE(email_verified_at, NOW())
+WHERE id = $1;

@@ -21,6 +21,9 @@ var (
 	// ErrRefreshReuse: se detectó reutilización de un refresh token ya
 	// revocado; toda la familia de tokens fue revocada.
 	ErrRefreshReuse = errors.New("auth: refresh token reutilizado; familia revocada")
+	// ErrInvalidEmailToken: el token enviado por correo (recuperación o
+	// verificación) no existe, ya se usó o expiró.
+	ErrInvalidEmailToken = errors.New("auth: token de correo inválido o expirado")
 )
 
 // ValidationError indica datos de entrada inválidos. Su mensaje es apto
@@ -36,12 +39,13 @@ func NewValidationError(msg string) error { return &ValidationError{Msg: msg} }
 
 // UserProfile es el perfil público del usuario devuelto por register/login/me.
 type UserProfile struct {
-	ID          uuid.UUID `json:"id"`
-	Username    string    `json:"username"`
-	Email       string    `json:"email"`
-	DisplayName *string   `json:"display_name"`
-	AvatarURL   *string   `json:"avatar_url"`
-	CreatedAt   time.Time `json:"created_at"`
+	ID            uuid.UUID `json:"id"`
+	Username      string    `json:"username"`
+	Email         string    `json:"email"`
+	DisplayName   *string   `json:"display_name"`
+	AvatarURL     *string   `json:"avatar_url"`
+	EmailVerified bool      `json:"email_verified"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 // TokenPair es la respuesta de register/login/refresh.

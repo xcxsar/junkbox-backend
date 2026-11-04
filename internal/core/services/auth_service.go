@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log"
 	"net/mail"
 	"net/url"
 	"regexp"
@@ -51,6 +52,21 @@ type AuthService struct {
 	hasher     ports.PasswordHasher
 	jwt        ports.TokenManager
 	refreshTTL time.Duration
+	// verification envía el correo de verificación tras el registro. Es
+	// opcional (nil en tests que no lo usan).
+	verification VerificationSender
+}
+
+// VerificationSender envía el enlace de verificación a un usuario recién
+// registrado. Lo implementa *AccountEmailService.
+type VerificationSender interface {
+	SendVerification(ctx context.Context, user sqlc.User) error
+}
+
+// SetVerificationSender activa el envío del correo de verificación en
+// Register.
+func (s *AuthService) SetVerificationSender(v VerificationSender) {
+	s.verification = v
 }
 
 // NewAuthService crea el servicio. refreshTTL es la vigencia de los
@@ -111,17 +127,25 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*domain.T
 	}
 
 	user := sqlc.User{
-		ID:          created.ID,
-		Username:    created.Username,
-		Email:       created.Email,
-		DisplayName: created.DisplayName,
-		AvatarUrl:   created.AvatarUrl,
-		CreatedAt:   created.CreatedAt,
-		UpdatedAt:   created.UpdatedAt,
+		ID:              created.ID,
+		Username:        created.Username,
+		Email:           created.Email,
+		DisplayName:     created.DisplayName,
+		AvatarUrl:       created.AvatarUrl,
+		CreatedAt:       created.CreatedAt,
+		UpdatedAt:       created.UpdatedAt,
+		EmailVerifiedAt: created.EmailVerifiedAt,
 	}
 	pair, err := s.issuePair(ctx, user, uuid.New() /* family nueva */)
 	if err != nil {
 		return nil, nil, err
+	}
+	// Un fallo al encolar la verificación no invalida el registro: el
+	// usuario puede pedir el reenvío desde /auth/email/verify/resend.
+	if s.verification != nil {
+		if err := s.verification.SendVerification(ctx, user); err != nil {
+			log.Printf("auth: encolar verificación de %s: %v", user.ID, err)
+		}
 	}
 	profile := profileFromUser(user)
 	return &pair.TokenPair, &profile, nil
@@ -415,11 +439,12 @@ func stringPtr(ns sql.NullString) *string {
 
 func profileFromUser(u sqlc.User) domain.UserProfile {
 	return domain.UserProfile{
-		ID:          u.ID,
-		Username:    u.Username,
-		Email:       u.Email,
-		DisplayName: stringPtr(u.DisplayName),
-		AvatarURL:   stringPtr(u.AvatarUrl),
-		CreatedAt:   u.CreatedAt,
+		ID:            u.ID,
+		Username:      u.Username,
+		Email:         u.Email,
+		DisplayName:   stringPtr(u.DisplayName),
+		AvatarURL:     stringPtr(u.AvatarUrl),
+		EmailVerified: u.EmailVerifiedAt.Valid,
+		CreatedAt:     u.CreatedAt,
 	}
 }
