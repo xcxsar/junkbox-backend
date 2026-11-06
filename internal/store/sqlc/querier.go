@@ -23,8 +23,17 @@ type Querier interface {
 	// un único UPDATE, dos peticiones concurrentes no pueden consumirlo dos veces.
 	ConsumeEmailToken(ctx context.Context, arg ConsumeEmailTokenParams) (uuid.UUID, error)
 	CountRecentEmailTokens(ctx context.Context, arg CountRecentEmailTokensParams) (int64, error)
+	CountReviewsByTarget(ctx context.Context, arg CountReviewsByTargetParams) (int64, error)
 	CountSongs(ctx context.Context) (int64, error)
+	// Reseñas (Fase 4). Una por usuario y objetivo; el índice único parcial
+	// rechaza la segunda con 23505. rating_score es el voto actual del autor
+	// sobre el mismo objetivo (NULL si no calificó).
+	// En los filtros por objetivo solo uno de song_id / album_id / artist_id
+	// llega con valor; las comparaciones con NULL se descartan.
+	CreateReview(ctx context.Context, arg CreateReviewParams) (uuid.UUID, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
+	DeleteRating(ctx context.Context, id uuid.UUID) (int64, error)
+	DeleteReview(ctx context.Context, id uuid.UUID) (int64, error)
 	EnqueueEmail(ctx context.Context, arg EnqueueEmailParams) error
 	ExistsUserByEmailOrUsername(ctx context.Context, arg ExistsUserByEmailOrUsernameParams) (bool, error)
 	GetAlbum(ctx context.Context, arg GetAlbumParams) (GetAlbumRow, error)
@@ -34,7 +43,9 @@ type Querier interface {
 	// Medianas del catálogo para imputar los audio features que FreqBlog
 	// devuelve nulos (speechiness, liveness y a veces instrumentalness).
 	GetCatalogFeatureMedians(ctx context.Context) (GetCatalogFeatureMediansRow, error)
+	GetRatingByID(ctx context.Context, id uuid.UUID) (Rating, error)
 	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshToken, error)
+	GetReviewByID(ctx context.Context, id uuid.UUID) (GetReviewByIDRow, error)
 	GetSongByTrackID(ctx context.Context, trackID sql.NullString) (GetSongByTrackIDRow, error)
 	// GetTrack acepta el id local o el track_id de Spotify; el otro se pasa
 	// vacío (0 / '') para que solo coincida uno de los dos índices.
@@ -43,12 +54,17 @@ type Querier interface {
 	GetUserByEmail(ctx context.Context, email string) (User, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (User, error)
 	GetUserByUsername(ctx context.Context, username string) (User, error)
+	// GetUserRating busca el voto del usuario sobre un objetivo. Solo uno de
+	// song_id / album_id / artist_id llega con valor; las comparaciones con NULL
+	// se descartan y queda la del índice único correspondiente.
+	GetUserRating(ctx context.Context, arg GetUserRatingParams) (Rating, error)
 	InsertEmailToken(ctx context.Context, arg InsertEmailTokenParams) error
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
 	InvalidateEmailTokens(ctx context.Context, arg InvalidateEmailTokensParams) error
 	IsAccessTokenRevoked(ctx context.Context, jti uuid.UUID) (bool, error)
 	// --- Worker de embeddings ---
 	ListPendingEmbeddingTracks(ctx context.Context, arg ListPendingEmbeddingTracksParams) ([]ListPendingEmbeddingTracksRow, error)
+	ListReviewsByTarget(ctx context.Context, arg ListReviewsByTargetParams) ([]ListReviewsByTargetRow, error)
 	ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]ListTracksByAlbumRow, error)
 	MarkEmailFailed(ctx context.Context, arg MarkEmailFailedParams) error
 	MarkEmailRetry(ctx context.Context, arg MarkEmailRetryParams) error
@@ -80,16 +96,26 @@ type Querier interface {
 	// parecido en total (el título exacto antes que uno que solo lo contiene).
 	SearchTracksTrigram(ctx context.Context, arg SearchTracksTrigramParams) ([]SearchTracksTrigramRow, error)
 	SetRefreshTokenReplacedBy(ctx context.Context, arg SetRefreshTokenReplacedByParams) error
+	UpdateReview(ctx context.Context, arg UpdateReviewParams) (int64, error)
 	UpdateSongAudioFeaturesAndEmbedding(ctx context.Context, arg UpdateSongAudioFeaturesAndEmbeddingParams) (int64, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
 	UpsertAlbum(ctx context.Context, arg UpsertAlbumParams) (uuid.UUID, error)
+	UpsertAlbumRating(ctx context.Context, arg UpsertAlbumRatingParams) (UpsertAlbumRatingRow, error)
 	// Los artistas simplificados de una búsqueda de canciones no traen géneros,
 	// popularidad ni imagen: en conflicto no se pisan los valores conocidos.
 	UpsertArtistBySpotifyID(ctx context.Context, arg UpsertArtistBySpotifyIDParams) (uuid.UUID, error)
+	UpsertArtistRating(ctx context.Context, arg UpsertArtistRatingParams) (UpsertArtistRatingRow, error)
 	// Una canción del CSV que ya tiene embedding conserva sus datos históricos;
 	// solo se completan los enlaces y el ISRC. pending_embedding queda TRUE solo
 	// si aún no hay vector.
 	UpsertSongFromSpotify(ctx context.Context, arg UpsertSongFromSpotifyParams) (UpsertSongFromSpotifyRow, error)
+	// Calificaciones (Fase 4). Un voto por usuario y objetivo: votar de nuevo
+	// reemplaza el puntaje. Hay un upsert por objetivo porque cada ON CONFLICT
+	// necesita su propio índice único parcial. El trigger trigger_ratings_stats
+	// mantiene ratings_count / avg_rating del objetivo.
+	// inserted distingue alta (201) de actualización (200): xmax = 0 solo en la
+	// versión de fila recién insertada.
+	UpsertSongRating(ctx context.Context, arg UpsertSongRatingParams) (UpsertSongRatingRow, error)
 }
 
 var _ Querier = (*Queries)(nil)

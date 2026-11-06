@@ -61,6 +61,7 @@ type TrackDetail struct {
 	AlbumID       *uuid.UUID     `json:"album_id"`
 	ISRC          *string        `json:"isrc"`
 	AudioFeatures *AudioFeatures `json:"audio_features"`
+	Ratings       RatingStats    `json:"ratings"`
 }
 
 // AudioFeatures son los atributos acústicos de una canción. Los campos nil
@@ -80,30 +81,33 @@ type AudioFeatures struct {
 	TimeSignature    *int32   `json:"time_signature"`
 }
 
-// Artist es un artista del catálogo.
+// Artist es un artista del catálogo. Ratings solo se llena en el detalle.
 type Artist struct {
-	ID         uuid.UUID `json:"id"`
-	SpotifyID  *string   `json:"spotify_id"`
-	Name       string    `json:"name"`
-	Genres     []string  `json:"genres"`
-	Popularity *int32    `json:"popularity"`
-	ImageURL   *string   `json:"image_url"`
-	CreatedAt  time.Time `json:"created_at"`
+	ID         uuid.UUID    `json:"id"`
+	SpotifyID  *string      `json:"spotify_id"`
+	Name       string       `json:"name"`
+	Genres     []string     `json:"genres"`
+	Popularity *int32       `json:"popularity"`
+	ImageURL   *string      `json:"image_url"`
+	CreatedAt  time.Time    `json:"created_at"`
+	Ratings    *RatingStats `json:"ratings,omitempty"`
 }
 
-// Album es un álbum del catálogo. Tracks solo se llena en el detalle.
+// Album es un álbum del catálogo. Tracks y Ratings solo se llenan en el
+// detalle.
 type Album struct {
-	ID          uuid.UUID  `json:"id"`
-	SpotifyID   *string    `json:"spotify_id"`
-	Title       string     `json:"title"`
-	ArtistID    *uuid.UUID `json:"artist_id"`
-	ArtistName  string     `json:"artist_name"`
-	ReleaseYear *int32     `json:"release_year"`
-	AlbumType   string     `json:"album_type"`
-	ImageURL    *string    `json:"image_url"`
-	TotalTracks int32      `json:"total_tracks"`
-	CreatedAt   time.Time  `json:"created_at"`
-	Tracks      []Track    `json:"tracks,omitempty"`
+	ID          uuid.UUID    `json:"id"`
+	SpotifyID   *string      `json:"spotify_id"`
+	Title       string       `json:"title"`
+	ArtistID    *uuid.UUID   `json:"artist_id"`
+	ArtistName  string       `json:"artist_name"`
+	ReleaseYear *int32       `json:"release_year"`
+	AlbumType   string       `json:"album_type"`
+	ImageURL    *string      `json:"image_url"`
+	TotalTracks int32        `json:"total_tracks"`
+	CreatedAt   time.Time    `json:"created_at"`
+	Tracks      []Track      `json:"tracks,omitempty"`
+	Ratings     *RatingStats `json:"ratings,omitempty"`
 }
 
 // --- Entidades importadas desde Spotify (entrada de CatalogImporter) ---

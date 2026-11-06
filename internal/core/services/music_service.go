@@ -208,15 +208,10 @@ func (s *MusicService) searchRemote(ctx context.Context, query, searchType strin
 // GetTrack devuelve el detalle de una canción por id local (entero) o por
 // su ID de Spotify.
 func (s *MusicService) GetTrack(ctx context.Context, id string) (*domain.TrackDetail, error) {
-	var arg sqlc.GetTrackParams
-	if n, err := strconv.ParseInt(id, 10, 32); err == nil && n > 0 {
-		arg.ID = int32(n)
-	} else if spotifyIDPattern.MatchString(id) {
-		arg.SpotifyID = id
-	} else {
-		return nil, domain.NewValidationError("id debe ser un entero positivo o un ID de Spotify")
+	arg, err := parseTrackID(id)
+	if err != nil {
+		return nil, err
 	}
-
 	r, err := s.catalog.GetTrack(ctx, arg)
 	if err != nil {
 		return nil, notFoundOr(err, "music: obtener canción")
@@ -238,6 +233,7 @@ func (s *MusicService) GetTrack(ctx context.Context, id string) (*domain.TrackDe
 		ArtistID: r.ArtistID,
 		AlbumID:  r.AlbumID,
 		ISRC:     stringPtr(r.Isrc),
+		Ratings:  domain.RatingStats{Count: r.RatingsCount, Average: r.AvgRating},
 	}
 	features := domain.AudioFeatures{
 		Danceability:     float64Ptr(r.Danceability),
@@ -270,6 +266,7 @@ func (s *MusicService) GetArtist(ctx context.Context, id string) (*domain.Artist
 		return nil, notFoundOr(err, "music: obtener artista")
 	}
 	artist := artistFromRow(r)
+	artist.Ratings = &domain.RatingStats{Count: r.RatingsCount, Average: r.AvgRating}
 	return &artist, nil
 }
 
@@ -285,6 +282,7 @@ func (s *MusicService) GetAlbum(ctx context.Context, id string) (*domain.Album, 
 		return nil, notFoundOr(err, "music: obtener álbum")
 	}
 	album := albumFromRow(r)
+	album.Ratings = &domain.RatingStats{Count: r.RatingsCount, Average: r.AvgRating}
 
 	rows, err := s.catalog.ListTracksByAlbum(ctx, &album.ID)
 	if err != nil {
@@ -307,6 +305,59 @@ func (s *MusicService) GetAlbum(ctx context.Context, id string) (*domain.Album, 
 		}
 	}
 	return &album, nil
+}
+
+// ResolveTarget resuelve el objetivo de una calificación o reseña a su id
+// local. id admite los mismos formatos que el detalle del catálogo (id
+// local o ID de Spotify). Solo busca en el catálogo local: un ID de Spotify
+// que nunca se importó devuelve ErrNotFound.
+func (s *MusicService) ResolveTarget(ctx context.Context, targetType, id string) (domain.Target, error) {
+	switch targetType {
+	case domain.TargetSong:
+		arg, err := parseTrackID(id)
+		if err != nil {
+			return domain.Target{}, err
+		}
+		r, err := s.catalog.GetTrack(ctx, arg)
+		if err != nil {
+			return domain.Target{}, notFoundOr(err, "music: resolver canción")
+		}
+		return domain.Target{Type: targetType, SongID: r.ID}, nil
+	case domain.TargetAlbum:
+		localID, spotifyID, err := parseEntityID(id)
+		if err != nil {
+			return domain.Target{}, err
+		}
+		r, err := s.catalog.GetAlbum(ctx, sqlc.GetAlbumParams{ID: localID, SpotifyID: spotifyID})
+		if err != nil {
+			return domain.Target{}, notFoundOr(err, "music: resolver álbum")
+		}
+		return domain.Target{Type: targetType, AlbumID: r.ID}, nil
+	case domain.TargetArtist:
+		localID, spotifyID, err := parseEntityID(id)
+		if err != nil {
+			return domain.Target{}, err
+		}
+		r, err := s.catalog.GetArtist(ctx, sqlc.GetArtistParams{ID: localID, SpotifyID: spotifyID})
+		if err != nil {
+			return domain.Target{}, notFoundOr(err, "music: resolver artista")
+		}
+		return domain.Target{Type: targetType, ArtistID: r.ID}, nil
+	default:
+		return domain.Target{}, domain.NewValidationError("target_type debe ser song, album o artist")
+	}
+}
+
+// parseTrackID interpreta el id de una canción: entero local o ID de
+// Spotify.
+func parseTrackID(id string) (sqlc.GetTrackParams, error) {
+	if n, err := strconv.ParseInt(id, 10, 32); err == nil && n > 0 {
+		return sqlc.GetTrackParams{ID: int32(n)}, nil
+	}
+	if spotifyIDPattern.MatchString(id) {
+		return sqlc.GetTrackParams{SpotifyID: id}, nil
+	}
+	return sqlc.GetTrackParams{}, domain.NewValidationError("id debe ser un entero positivo o un ID de Spotify")
 }
 
 // parseEntityID interpreta el id de un artista o álbum: UUID local o ID de

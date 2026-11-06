@@ -25,3 +25,13 @@ sql:
               type: "UUID"
               pointer: true
             nullable: true
+          # NUMERIC (puntajes de 0.5 en 0.5 y promedios de 2 decimales) como
+          # float64: los valores son pequeños y exactos en binario o redondeados.
+          - db_type: "pg_catalog.numeric"
+            go_type: "float64"
+            nullable: false
+          - db_type: "pg_catalog.numeric"
+            go_type:
+              type: "float64"
+              pointer: true
+            nullable: true

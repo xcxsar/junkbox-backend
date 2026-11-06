@@ -56,7 +56,7 @@ func (q *Queries) ClaimArtistByName(ctx context.Context, arg ClaimArtistByNamePa
 const getAlbum = `-- name: GetAlbum :one
 SELECT
     id, spotify_id, title, artist_id, artist_name, release_year, album_type,
-    image_url, total_tracks, created_at
+    image_url, total_tracks, created_at, ratings_count, avg_rating
 FROM albums
 WHERE id = $1::uuid OR spotify_id = $2::text
 LIMIT 1
@@ -68,16 +68,18 @@ type GetAlbumParams struct {
 }
 
 type GetAlbumRow struct {
-	ID          uuid.UUID      `json:"id"`
-	SpotifyID   sql.NullString `json:"spotify_id"`
-	Title       string         `json:"title"`
-	ArtistID    *uuid.UUID     `json:"artist_id"`
-	ArtistName  string         `json:"artist_name"`
-	ReleaseYear sql.NullInt32  `json:"release_year"`
-	AlbumType   string         `json:"album_type"`
-	ImageUrl    sql.NullString `json:"image_url"`
-	TotalTracks int32          `json:"total_tracks"`
-	CreatedAt   time.Time      `json:"created_at"`
+	ID           uuid.UUID      `json:"id"`
+	SpotifyID    sql.NullString `json:"spotify_id"`
+	Title        string         `json:"title"`
+	ArtistID     *uuid.UUID     `json:"artist_id"`
+	ArtistName   string         `json:"artist_name"`
+	ReleaseYear  sql.NullInt32  `json:"release_year"`
+	AlbumType    string         `json:"album_type"`
+	ImageUrl     sql.NullString `json:"image_url"`
+	TotalTracks  int32          `json:"total_tracks"`
+	CreatedAt    time.Time      `json:"created_at"`
+	RatingsCount int32          `json:"ratings_count"`
+	AvgRating    *float64       `json:"avg_rating"`
 }
 
 func (q *Queries) GetAlbum(ctx context.Context, arg GetAlbumParams) (GetAlbumRow, error) {
@@ -94,12 +96,15 @@ func (q *Queries) GetAlbum(ctx context.Context, arg GetAlbumParams) (GetAlbumRow
 		&i.ImageUrl,
 		&i.TotalTracks,
 		&i.CreatedAt,
+		&i.RatingsCount,
+		&i.AvgRating,
 	)
 	return i, err
 }
 
 const getArtist = `-- name: GetArtist :one
-SELECT id, spotify_id, name, genres, popularity, image_url, created_at
+SELECT id, spotify_id, name, genres, popularity, image_url, created_at,
+    ratings_count, avg_rating
 FROM artists
 WHERE id = $1::uuid OR spotify_id = $2::text
 LIMIT 1
@@ -111,13 +116,15 @@ type GetArtistParams struct {
 }
 
 type GetArtistRow struct {
-	ID         uuid.UUID      `json:"id"`
-	SpotifyID  sql.NullString `json:"spotify_id"`
-	Name       string         `json:"name"`
-	Genres     []string       `json:"genres"`
-	Popularity sql.NullInt32  `json:"popularity"`
-	ImageUrl   sql.NullString `json:"image_url"`
-	CreatedAt  time.Time      `json:"created_at"`
+	ID           uuid.UUID      `json:"id"`
+	SpotifyID    sql.NullString `json:"spotify_id"`
+	Name         string         `json:"name"`
+	Genres       []string       `json:"genres"`
+	Popularity   sql.NullInt32  `json:"popularity"`
+	ImageUrl     sql.NullString `json:"image_url"`
+	CreatedAt    time.Time      `json:"created_at"`
+	RatingsCount int32          `json:"ratings_count"`
+	AvgRating    *float64       `json:"avg_rating"`
 }
 
 func (q *Queries) GetArtist(ctx context.Context, arg GetArtistParams) (GetArtistRow, error) {
@@ -131,6 +138,8 @@ func (q *Queries) GetArtist(ctx context.Context, arg GetArtistParams) (GetArtist
 		&i.Popularity,
 		&i.ImageUrl,
 		&i.CreatedAt,
+		&i.RatingsCount,
+		&i.AvgRating,
 	)
 	return i, err
 }
@@ -205,7 +214,8 @@ SELECT
     s.acousticness, s.instrumentalness, s.liveness, s.valence, s.tempo,
     s.time_signature, s.pending_embedding,
     (s.embedding IS NOT NULL)::bool AS has_embedding,
-    al.title AS album_title
+    al.title AS album_title,
+    s.ratings_count, s.avg_rating
 FROM song_metadata s
 LEFT JOIN albums al ON al.id = s.album_id
 WHERE s.id = $1::int OR s.track_id = $2::text
@@ -244,6 +254,8 @@ type GetTrackRow struct {
 	PendingEmbedding bool            `json:"pending_embedding"`
 	HasEmbedding     bool            `json:"has_embedding"`
 	AlbumTitle       sql.NullString  `json:"album_title"`
+	RatingsCount     int32           `json:"ratings_count"`
+	AvgRating        *float64        `json:"avg_rating"`
 }
 
 // GetTrack acepta el id local o el track_id de Spotify; el otro se pasa
@@ -278,6 +290,8 @@ func (q *Queries) GetTrack(ctx context.Context, arg GetTrackParams) (GetTrackRow
 		&i.PendingEmbedding,
 		&i.HasEmbedding,
 		&i.AlbumTitle,
+		&i.RatingsCount,
+		&i.AvgRating,
 	)
 	return i, err
 }

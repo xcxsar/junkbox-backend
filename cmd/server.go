@@ -111,6 +111,8 @@ func runServer(cmd *cobra.Command) {
 		log.Println("aviso: sin FREQBLOG_API_KEY; las canciones importadas quedarán sin embedding")
 	}
 	musicSvc := services.NewMusicService(queries, postgres.NewCatalogImporter(db), provider, queue, cfg.SearchFallbackThreshold)
+	ratingSvc := services.NewRatingService(queries, musicSvc)
+	reviewSvc := services.NewReviewService(queries, musicSvc)
 
 	// 5. Purga periódica de la denylist, los tokens de correo y el outbox.
 	go purgeRevokedTokens(ctx, queries)
@@ -120,6 +122,8 @@ func runServer(cmd *cobra.Command) {
 		Auth:           httpapi.NewAuthHandler(authSvc, jwtManager),
 		Music:          httpapi.NewMusicHandler(musicSvc),
 		Account:        httpapi.NewAccountHandler(accountSvc),
+		Ratings:        httpapi.NewRatingHandler(ratingSvc),
+		Reviews:        httpapi.NewReviewHandler(reviewSvc),
 		JWT:            jwtManager,
 		Revocation:     revocationChecker,
 		AllowedOrigins: cfg.CORSAllowedOrigins,

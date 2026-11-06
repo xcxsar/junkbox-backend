@@ -55,14 +55,16 @@ SELECT
     s.acousticness, s.instrumentalness, s.liveness, s.valence, s.tempo,
     s.time_signature, s.pending_embedding,
     (s.embedding IS NOT NULL)::bool AS has_embedding,
-    al.title AS album_title
+    al.title AS album_title,
+    s.ratings_count, s.avg_rating
 FROM song_metadata s
 LEFT JOIN albums al ON al.id = s.album_id
 WHERE s.id = sqlc.arg(id)::int OR s.track_id = sqlc.arg(spotify_id)::text
 LIMIT 1;
 
 -- name: GetArtist :one
-SELECT id, spotify_id, name, genres, popularity, image_url, created_at
+SELECT id, spotify_id, name, genres, popularity, image_url, created_at,
+    ratings_count, avg_rating
 FROM artists
 WHERE id = sqlc.arg(id)::uuid OR spotify_id = sqlc.arg(spotify_id)::text
 LIMIT 1;
@@ -70,7 +72,7 @@ LIMIT 1;
 -- name: GetAlbum :one
 SELECT
     id, spotify_id, title, artist_id, artist_name, release_year, album_type,
-    image_url, total_tracks, created_at
+    image_url, total_tracks, created_at, ratings_count, avg_rating
 FROM albums
 WHERE id = sqlc.arg(id)::uuid OR spotify_id = sqlc.arg(spotify_id)::text
 LIMIT 1;

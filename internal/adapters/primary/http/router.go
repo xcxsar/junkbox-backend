@@ -17,6 +17,10 @@ type RouterOptions struct {
 	// Account expone recuperación de contraseña y verificación de correo.
 	// Si es nil, esas rutas no se montan.
 	Account *AccountHandler
+	// Ratings y Reviews exponen calificaciones y reseñas. Si son nil, esas
+	// rutas no se montan.
+	Ratings *RatingHandler
+	Reviews *ReviewHandler
 	JWT     chimw.JWTValidator
 	// Revocation comprueba la denylist y el corte global en cada petición
 	// autenticada. Si es nil, se omite la comprobación (tests).
@@ -68,6 +72,18 @@ func NewRouter(opts RouterOptions) http.Handler {
 				r.Get("/music/artists/{id}", opts.Music.Artist)
 				r.Get("/music/albums/{id}", opts.Music.Album)
 			}
+			if opts.Ratings != nil {
+				r.Post("/ratings", opts.Ratings.Rate)
+				r.Get("/ratings/my", opts.Ratings.Mine)
+				r.Delete("/ratings/{id}", opts.Ratings.Delete)
+			}
+			if opts.Reviews != nil {
+				r.Post("/reviews", opts.Reviews.Create)
+				r.Get("/reviews", opts.Reviews.List)
+				r.Get("/reviews/{id}", opts.Reviews.Get)
+				r.Put("/reviews/{id}", opts.Reviews.Update)
+				r.Delete("/reviews/{id}", opts.Reviews.Delete)
+			}
 		})
 	})
 
@@ -80,7 +96,7 @@ func NewRouter(opts RouterOptions) http.Handler {
 func corsHandler(origins []string) func(http.Handler) http.Handler {
 	opts := cors.Options{
 		AllowedOrigins: origins,
-		AllowedMethods: []string{http.MethodGet, http.MethodPost, http.MethodOptions},
+		AllowedMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
 		AllowedHeaders: []string{"Authorization", "Content-Type"},
 		MaxAge:         300,
 	}

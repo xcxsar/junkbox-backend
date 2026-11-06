@@ -1,6 +1,6 @@
 # Guía de Implementación del Backend de Junkbox
 
-Este documento establece la especificación técnica, diseño de arquitectura y guía paso a paso para la implementación de las **Fases 1, 2 y 3** del backend de **Junkbox** en **Go**.
+Este documento establece la especificación técnica, diseño de arquitectura y guía paso a paso para la implementación de las **Fases 1, 2, 3 y 4** del backend de **Junkbox** en **Go**.
 
 ---
 
@@ -40,7 +40,13 @@ Este documento establece la especificación técnica, diseño de arquitectura y 
   - [5.3 Flujos](#53-flujos)
   - [5.4 Envío de Correos: Outbox, SMTP, Mailpit y Resend](#54-envío-de-correos-outbox-smtp-mailpit-y-resend)
   - [5.5 Decisiones](#55-decisiones)
-- [6. Guía de Verificación y Pruebas con cURL](#6-guía-de-verificación-y-pruebas-con-curl)
+- [6. Fase 4: Módulo de Calificaciones y Reseñas (WBS 1.3.3 y 1.3.4)](#6-fase-4-módulo-de-calificaciones-y-reseñas-wbs-133-y-134)
+  - [6.1 Arquitectura del Módulo y Modelo Relacional](#61-arquitectura-del-módulo-y-modelo-relacional)
+  - [6.2 Migración de Base de Datos: `create_ratings_and_reviews`](#62-migración-de-base-de-datos-create_ratings_and_reviews)
+  - [6.3 Consultas SQL para SQLC (`db/queries/ratings.sql` y `db/queries/reviews.sql`)](#63-consultas-sql-para-sqlc-dbqueriesratingssql-y-dbqueriesreviewssql)
+  - [6.4 Lógica de Negocio y Casos de Uso (`RatingService` y `ReviewService`)](#64-lógica-de-negocio-y-casos-de-uso-ratingservice-y-reviewservice)
+  - [6.5 Adaptadores HTTP Chi: Endpoints de Calificaciones y Reseñas](#65-adaptadores-http-chi-endpoints-de-calificaciones-y-reseñas)
+- [7. Guía de Verificación y Pruebas con cURL](#7-guía-de-verificación-y-pruebas-con-curl)
 
 ---
 
@@ -817,7 +823,7 @@ junkbox-backend/
 ├── db/
 │   ├── docker-compose.yml
 │   ├── migrations/
-│   ├── queries/                 # song_metadata.sql, users.sql, refresh_tokens.sql, revoked_tokens.sql, catalog.sql (F3)
+│   ├── queries/                 # song_metadata.sql, users.sql, refresh_tokens.sql, revoked_tokens.sql, catalog.sql (F3), ratings.sql y reviews.sql (F4)
 │   ├── scripts/                 # ingest_songs.sql, truncate_all.sql, backfill_artists.sql (F3)
 │   └── seed/
 ├── internal/
@@ -825,12 +831,15 @@ junkbox-backend/
 │   │   ├── primary/
 │   │   │   └── http/
 │   │   │       ├── dto/
-│   │   │       │   └── auth_dto.go
+│   │   │       │   ├── auth_dto.go
+│   │   │       │   └── review_dto.go             # F4
 │   │   │       ├── middleware/
 │   │   │       │   ├── auth_middleware.go        # AuthMiddleware + RevocationChecker
 │   │   │       │   └── auth_middleware_test.go
 │   │   │       ├── handlers_auth.go
 │   │   │       ├── handlers_music.go             # F3: /music/search, tracks, artists, albums
+│   │   │       ├── handlers_ratings.go           # F4: /ratings
+│   │   │       ├── handlers_reviews.go           # F4: /reviews
 │   │   │       ├── router.go                     # rutas + CORS (go-chi/cors) restringido a CORS_ALLOWED_ORIGINS
 │   │   │       └── router_test.go
 │   │   └── secondary/
@@ -850,17 +859,22 @@ junkbox-backend/
 │   ├── core/
 │   │   ├── domain/
 │   │   │   ├── music.go         # F3: Track, Artist, Album, SearchResult, Imported*, EmbeddingJob
+│   │   │   ├── review.go        # F4: Target, Rating, Review, ReviewPage, ErrForbidden, ErrReviewAlreadyExists
 │   │   │   └── user.go          # UserProfile, TokenPair, AccessClaims, errores de dominio
 │   │   ├── ports/
 │   │   │   ├── auth_ports.go    # UserStore, TokenStore, RevocationStore, PasswordHasher, TokenManager
-│   │   │   └── music_ports.go   # F3: CatalogStore, CatalogImporter, MusicProvider, AudioFeaturesProvider, EmbeddingStore, EmbeddingQueue
+│   │   │   ├── music_ports.go   # F3: CatalogStore, CatalogImporter, MusicProvider, AudioFeaturesProvider, EmbeddingStore, EmbeddingQueue
+│   │   │   └── review_ports.go  # F4: TargetResolver, RatingStore, ReviewStore
 │   │   └── services/
 │   │       ├── audio_features_worker.go       # F3
 │   │       ├── audio_features_worker_test.go
 │   │       ├── auth_service.go
 │   │       ├── auth_service_test.go
-│   │       ├── music_service.go               # F3
-│   │       └── music_service_test.go
+│   │       ├── music_service.go               # F3 (+ ResolveTarget, F4)
+│   │       ├── music_service_test.go
+│   │       ├── rating_service.go              # F4
+│   │       ├── review_service.go              # F4
+│   │       └── review_service_test.go
 │   └── store/
 │       └── sqlc/                # generado por `make sqlc`
 ├── Makefile
@@ -1694,7 +1708,399 @@ Los enlaces son `FRONTEND_URL/restablecer-contrasena#token=…` (30 min) y `FRON
 
 ---
 
-## 6. Guía de Verificación y Pruebas con cURL
+## 6. Fase 4: Módulo de Calificaciones y Reseñas (WBS 1.3.3 y 1.3.4)
+
+Esta fase implementa los entregables **1.3.3 (Desarrollo del módulo de calificaciones)** y **1.3.4 (Desarrollo del módulo de reseñas)** del WBS de Junkbox:
+- Calificación de **0.5 a 5.0 estrellas en pasos de 0.5** (medias estrellas).
+- Reseña textual que se puede publicar con o sin calificación.
+- Soporte para **3 objetivos de catálogo**: canciones (`song_metadata`), álbumes (`albums`) y artistas (`artists`), con integridad referencial mediante claves foráneas mutuamente excluyentes (arco exclusivo con `CHECK`).
+- **Número de votos y promedio** (`ratings_count`, `avg_rating`) mantenidos por un trigger de PostgreSQL en la misma transacción que el voto, sin recorrer la tabla (latencia muy por debajo de 1 segundo, criterio SMART).
+
+---
+
+### 6.1 Arquitectura del Módulo y Modelo Relacional
+
+```mermaid
+erDiagram
+    USERS ||--o{ RATINGS : "asigna (0.5 a 5.0)"
+    USERS ||--o{ REVIEWS : "redacta"
+
+    RATINGS }o--o| SONG_METADATA : "califica canción"
+    RATINGS }o--o| ALBUMS : "califica álbum"
+    RATINGS }o--o| ARTISTS : "califica artista"
+
+    REVIEWS }o--o| SONG_METADATA : "opina sobre canción"
+    REVIEWS }o--o| ALBUMS : "opina sobre álbum"
+    REVIEWS }o--o| ARTISTS : "opina sobre artista"
+
+    SONG_METADATA {
+        int id PK
+        int ratings_count "Trigger"
+        numeric ratings_sum "Trigger"
+        numeric avg_rating "Trigger, NULL sin votos"
+    }
+
+    ALBUMS {
+        uuid id PK
+        int ratings_count "Trigger"
+        numeric ratings_sum "Trigger"
+        numeric avg_rating "Trigger, NULL sin votos"
+    }
+
+    ARTISTS {
+        uuid id PK
+        int ratings_count "Trigger"
+        numeric ratings_sum "Trigger"
+        numeric avg_rating "Trigger, NULL sin votos"
+    }
+```
+
+#### Reglas de Integridad y Diseño
+1. **Arco exclusivo:** en `ratings` y en `reviews`, exactamente una de `song_id`, `album_id` y `artist_id` es no nula (`CHECK (num_nonnulls(...) = 1)`).
+2. **Unicidad por usuario:** un usuario tiene como máximo **1 voto** y **1 reseña** por objetivo (índices únicos parciales). Votar de nuevo reemplaza el puntaje (`UPSERT`); una segunda reseña se rechaza con `409`, y para cambiarla se usa `PUT`.
+3. **Escala:** `0.5 <= score <= 5.0` y `score * 2 = trunc(score * 2)` (múltiplo de 0.5). Cero estrellas no es un voto válido.
+4. **Reseña y voto no van enlazados:** `reviews` no tiene `rating_id`. El puntaje que acompaña a una reseña (`rating_score`) es el voto **actual** del autor sobre el mismo objetivo, obtenido con un `LEFT JOIN` por usuario y objetivo. Así no hay enlaces que queden huérfanos: si el autor borra su voto, la reseña muestra `null`; si vuelve a calificar, muestra el nuevo puntaje.
+5. **Sin votos ≠ promedio 0:** `avg_rating` es `NULL` mientras `ratings_count = 0`.
+6. **`likes_count`:** columna reservada para una fase futura; por ahora siempre vale 0 y no hay endpoints de likes.
+
+#### Estadísticas por deltas
+El trigger no recalcula `AVG(score)` sobre la tabla. Suma o resta el voto que cambia (`ratings_count ± 1`, `ratings_sum ± score`) y deriva `avg_rating = round(ratings_sum / ratings_count, 2)`. Así, cada voto cuesta O(1), y votos concurrentes sobre el mismo objetivo no se pisan: el `UPDATE` bloquea la fila del objetivo y, en `READ COMMITTED`, se reevalúa sobre la versión más reciente. Recalcular con `SELECT AVG(...)` en la sentencia sí podía perder votos concurrentes, porque cada transacción no ve el voto aún no confirmado de la otra.
+
+---
+
+### 6.2 Migración de Base de Datos: `create_ratings_and_reviews`
+
+Ubicación: `db/migrations/20261104000006_create_ratings_and_reviews.sql`. Los `DEFAULT` constantes de las columnas nuevas no reescriben las 1.16M filas de `song_metadata`. El `Down` borra las tablas, las funciones y las columnas, pero nunca la tabla `song_metadata`.
+
+```sql
+-- +goose Up
+
+-- Estadísticas desnormalizadas de calificaciones en el catálogo. Las mantiene
+-- el trigger de ratings con deltas (no recorre la tabla en cada voto).
+-- avg_rating es NULL mientras no haya votos. Los DEFAULT constantes no
+-- reescriben las 1.16M filas de song_metadata.
+ALTER TABLE song_metadata
+    ADD COLUMN ratings_count INT NOT NULL DEFAULT 0,
+    ADD COLUMN ratings_sum NUMERIC(12,1) NOT NULL DEFAULT 0,
+    ADD COLUMN avg_rating NUMERIC(3,2);
+
+ALTER TABLE albums
+    ADD COLUMN ratings_count INT NOT NULL DEFAULT 0,
+    ADD COLUMN ratings_sum NUMERIC(12,1) NOT NULL DEFAULT 0,
+    ADD COLUMN avg_rating NUMERIC(3,2);
+
+ALTER TABLE artists
+    ADD COLUMN ratings_count INT NOT NULL DEFAULT 0,
+    ADD COLUMN ratings_sum NUMERIC(12,1) NOT NULL DEFAULT 0,
+    ADD COLUMN avg_rating NUMERIC(3,2);
+
+-- Calificaciones: de 0.5 a 5.0 estrellas en pasos de 0.5. Cada fila apunta a
+-- exactamente uno de canción, álbum o artista (arco exclusivo).
+CREATE TABLE ratings (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    song_id INT REFERENCES song_metadata(id) ON DELETE CASCADE,
+    album_id UUID REFERENCES albums(id) ON DELETE CASCADE,
+    artist_id UUID REFERENCES artists(id) ON DELETE CASCADE,
+    score NUMERIC(2,1) NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT ratings_single_target CHECK (num_nonnulls(song_id, album_id, artist_id) = 1),
+    CONSTRAINT ratings_score_range CHECK (score >= 0.5 AND score <= 5.0 AND score * 2 = trunc(score * 2))
+);
+
+-- Un voto por usuario y objetivo (destino de los ON CONFLICT). El objetivo va
+-- primero para que el mismo índice sirva al borrado en cascada del catálogo.
+CREATE UNIQUE INDEX idx_ratings_song_user ON ratings(song_id, user_id) WHERE song_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_ratings_album_user ON ratings(album_id, user_id) WHERE album_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_ratings_artist_user ON ratings(artist_id, user_id) WHERE artist_id IS NOT NULL;
+CREATE INDEX idx_ratings_user_id ON ratings(user_id);
+
+CREATE TRIGGER trigger_ratings_updated_at
+BEFORE UPDATE ON ratings
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+-- Reseñas: texto sobre un objetivo, una por usuario y objetivo. El puntaje
+-- que se muestra junto a la reseña es el voto actual del autor sobre el mismo
+-- objetivo (se obtiene con un JOIN; no hay enlace rating_id que pueda quedar
+-- huérfano). likes_count queda reservado para una fase futura.
+CREATE TABLE reviews (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    song_id INT REFERENCES song_metadata(id) ON DELETE CASCADE,
+    album_id UUID REFERENCES albums(id) ON DELETE CASCADE,
+    artist_id UUID REFERENCES artists(id) ON DELETE CASCADE,
+    title VARCHAR(200),
+    content TEXT NOT NULL,
+    likes_count INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+
+    CONSTRAINT reviews_single_target CHECK (num_nonnulls(song_id, album_id, artist_id) = 1),
+    CONSTRAINT reviews_content_length CHECK (char_length(btrim(content)) BETWEEN 5 AND 5000)
+);
+
+CREATE UNIQUE INDEX idx_reviews_song_user ON reviews(song_id, user_id) WHERE song_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_reviews_album_user ON reviews(album_id, user_id) WHERE album_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_reviews_artist_user ON reviews(artist_id, user_id) WHERE artist_id IS NOT NULL;
+CREATE INDEX idx_reviews_song_created ON reviews(song_id, created_at DESC) WHERE song_id IS NOT NULL;
+CREATE INDEX idx_reviews_album_created ON reviews(album_id, created_at DESC) WHERE album_id IS NOT NULL;
+CREATE INDEX idx_reviews_artist_created ON reviews(artist_id, created_at DESC) WHERE artist_id IS NOT NULL;
+CREATE INDEX idx_reviews_user_id ON reviews(user_id);
+
+CREATE TRIGGER trigger_reviews_updated_at
+BEFORE UPDATE ON reviews
+FOR EACH ROW
+EXECUTE FUNCTION set_updated_at();
+
+-- adjust_rating_stats suma (o resta) un voto a las estadísticas del objetivo.
+-- El UPDATE bloquea la fila del objetivo y, en READ COMMITTED, se reevalúa
+-- sobre la versión más reciente: votos concurrentes no se pisan.
+-- +goose StatementBegin
+CREATE FUNCTION adjust_rating_stats(p_song INT, p_album UUID, p_artist UUID, p_count INT, p_sum NUMERIC)
+RETURNS VOID AS $$
+BEGIN
+    IF p_song IS NOT NULL THEN
+        UPDATE song_metadata
+        SET ratings_count = ratings_count + p_count,
+            ratings_sum = ratings_sum + p_sum,
+            avg_rating = round((ratings_sum + p_sum) / nullif(ratings_count + p_count, 0), 2)
+        WHERE id = p_song;
+    ELSIF p_album IS NOT NULL THEN
+        UPDATE albums
+        SET ratings_count = ratings_count + p_count,
+            ratings_sum = ratings_sum + p_sum,
+            avg_rating = round((ratings_sum + p_sum) / nullif(ratings_count + p_count, 0), 2)
+        WHERE id = p_album;
+    ELSIF p_artist IS NOT NULL THEN
+        UPDATE artists
+        SET ratings_count = ratings_count + p_count,
+            ratings_sum = ratings_sum + p_sum,
+            avg_rating = round((ratings_sum + p_sum) / nullif(ratings_count + p_count, 0), 2)
+        WHERE id = p_artist;
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+-- +goose StatementEnd
+
+-- +goose StatementBegin
+CREATE FUNCTION apply_rating_delta()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF TG_OP IN ('UPDATE', 'DELETE') THEN
+        PERFORM adjust_rating_stats(OLD.song_id, OLD.album_id, OLD.artist_id, -1, -OLD.score);
+    END IF;
+    IF TG_OP IN ('INSERT', 'UPDATE') THEN
+        PERFORM adjust_rating_stats(NEW.song_id, NEW.album_id, NEW.artist_id, 1, NEW.score);
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+-- +goose StatementEnd
+
+CREATE TRIGGER trigger_ratings_stats
+AFTER INSERT OR DELETE OR UPDATE OF score, song_id, album_id, artist_id ON ratings
+FOR EACH ROW
+EXECUTE FUNCTION apply_rating_delta();
+
+-- +goose Down
+DROP TABLE IF EXISTS reviews;
+DROP TABLE IF EXISTS ratings;
+DROP FUNCTION IF EXISTS apply_rating_delta();
+DROP FUNCTION IF EXISTS adjust_rating_stats(INT, UUID, UUID, INT, NUMERIC);
+
+ALTER TABLE artists
+    DROP COLUMN IF EXISTS avg_rating,
+    DROP COLUMN IF EXISTS ratings_sum,
+    DROP COLUMN IF EXISTS ratings_count;
+ALTER TABLE albums
+    DROP COLUMN IF EXISTS avg_rating,
+    DROP COLUMN IF EXISTS ratings_sum,
+    DROP COLUMN IF EXISTS ratings_count;
+ALTER TABLE song_metadata
+    DROP COLUMN IF EXISTS avg_rating,
+    DROP COLUMN IF EXISTS ratings_sum,
+    DROP COLUMN IF EXISTS ratings_count;
+```
+
+---
+
+### 6.3 Consultas SQL para SQLC (`db/queries/ratings.sql` y `db/queries/reviews.sql`)
+
+`sqlc.yaml` mapea `numeric` a `float64` (`*float64` si es nulable), así que `score`, `rating_score` y `avg_rating` llegan como números y no como `string`.
+
+Los upserts son tres, uno por objetivo, porque cada `ON CONFLICT` necesita su propio índice único parcial. Las lecturas por objetivo usan una sola query con tres parámetros nulables: solo uno llega con valor, y PostgreSQL descarta las comparaciones con `NULL`.
+
+#### `db/queries/ratings.sql`
+```sql
+-- Calificaciones (Fase 4). Un voto por usuario y objetivo: votar de nuevo
+-- reemplaza el puntaje. Hay un upsert por objetivo porque cada ON CONFLICT
+-- necesita su propio índice único parcial. El trigger trigger_ratings_stats
+-- mantiene ratings_count / avg_rating del objetivo.
+-- inserted distingue alta (201) de actualización (200): xmax = 0 solo en la
+-- versión de fila recién insertada.
+
+-- name: UpsertSongRating :one
+INSERT INTO ratings (user_id, song_id, score)
+VALUES (sqlc.arg(user_id), sqlc.arg(song_id)::int, sqlc.arg(score))
+ON CONFLICT (song_id, user_id) WHERE song_id IS NOT NULL
+DO UPDATE SET score = EXCLUDED.score
+RETURNING id, user_id, song_id, album_id, artist_id, score, created_at, updated_at,
+    (xmax::text = '0')::bool AS inserted;
+
+-- name: UpsertAlbumRating :one
+INSERT INTO ratings (user_id, album_id, score)
+VALUES (sqlc.arg(user_id), sqlc.arg(album_id)::uuid, sqlc.arg(score))
+ON CONFLICT (album_id, user_id) WHERE album_id IS NOT NULL
+DO UPDATE SET score = EXCLUDED.score
+RETURNING id, user_id, song_id, album_id, artist_id, score, created_at, updated_at,
+    (xmax::text = '0')::bool AS inserted;
+
+-- name: UpsertArtistRating :one
+INSERT INTO ratings (user_id, artist_id, score)
+VALUES (sqlc.arg(user_id), sqlc.arg(artist_id)::uuid, sqlc.arg(score))
+ON CONFLICT (artist_id, user_id) WHERE artist_id IS NOT NULL
+DO UPDATE SET score = EXCLUDED.score
+RETURNING id, user_id, song_id, album_id, artist_id, score, created_at, updated_at,
+    (xmax::text = '0')::bool AS inserted;
+
+-- GetUserRating busca el voto del usuario sobre un objetivo. Solo uno de
+-- song_id / album_id / artist_id llega con valor; las comparaciones con NULL
+-- se descartan y queda la del índice único correspondiente.
+-- name: GetUserRating :one
+SELECT id, user_id, song_id, album_id, artist_id, score, created_at, updated_at
+FROM ratings
+WHERE user_id = sqlc.arg(user_id)
+  AND (song_id = sqlc.narg(song_id)::int
+       OR album_id = sqlc.narg(album_id)::uuid
+       OR artist_id = sqlc.narg(artist_id)::uuid);
+
+-- name: GetRatingByID :one
+SELECT id, user_id, song_id, album_id, artist_id, score, created_at, updated_at
+FROM ratings
+WHERE id = $1;
+
+-- name: DeleteRating :execrows
+DELETE FROM ratings WHERE id = $1;
+```
+
+#### `db/queries/reviews.sql`
+```sql
+-- Reseñas (Fase 4). Una por usuario y objetivo; el índice único parcial
+-- rechaza la segunda con 23505. rating_score es el voto actual del autor
+-- sobre el mismo objetivo (NULL si no calificó).
+-- En los filtros por objetivo solo uno de song_id / album_id / artist_id
+-- llega con valor; las comparaciones con NULL se descartan.
+
+-- name: CreateReview :one
+INSERT INTO reviews (user_id, song_id, album_id, artist_id, title, content)
+VALUES (
+    sqlc.arg(user_id), sqlc.narg(song_id)::int, sqlc.narg(album_id)::uuid,
+    sqlc.narg(artist_id)::uuid, sqlc.narg(title), sqlc.arg(content)
+)
+RETURNING id;
+
+-- name: GetReviewByID :one
+SELECT
+    r.id, r.user_id, r.song_id, r.album_id, r.artist_id, r.title, r.content,
+    r.likes_count, r.created_at, r.updated_at,
+    u.username AS author_username,
+    u.display_name AS author_display_name,
+    u.avatar_url AS author_avatar_url,
+    rat.score AS rating_score
+FROM reviews r
+JOIN users u ON u.id = r.user_id
+LEFT JOIN ratings rat ON rat.user_id = r.user_id
+    AND (rat.song_id = r.song_id OR rat.album_id = r.album_id OR rat.artist_id = r.artist_id)
+WHERE r.id = $1;
+
+-- name: ListReviewsByTarget :many
+SELECT
+    r.id, r.user_id, r.song_id, r.album_id, r.artist_id, r.title, r.content,
+    r.likes_count, r.created_at, r.updated_at,
+    u.username AS author_username,
+    u.display_name AS author_display_name,
+    u.avatar_url AS author_avatar_url,
+    rat.score AS rating_score
+FROM reviews r
+JOIN users u ON u.id = r.user_id
+LEFT JOIN ratings rat ON rat.user_id = r.user_id
+    AND (rat.song_id = r.song_id OR rat.album_id = r.album_id OR rat.artist_id = r.artist_id)
+WHERE r.song_id = sqlc.narg(song_id)::int
+   OR r.album_id = sqlc.narg(album_id)::uuid
+   OR r.artist_id = sqlc.narg(artist_id)::uuid
+ORDER BY r.created_at DESC, r.id
+LIMIT sqlc.arg(max_results) OFFSET sqlc.arg(skip);
+
+-- name: CountReviewsByTarget :one
+SELECT count(*)
+FROM reviews
+WHERE song_id = sqlc.narg(song_id)::int
+   OR album_id = sqlc.narg(album_id)::uuid
+   OR artist_id = sqlc.narg(artist_id)::uuid;
+
+-- name: UpdateReview :execrows
+UPDATE reviews
+SET title = sqlc.narg(title), content = sqlc.arg(content)
+WHERE id = sqlc.arg(id);
+
+-- name: DeleteReview :execrows
+DELETE FROM reviews WHERE id = $1;
+```
+
+Además, `GetTrack`, `GetArtist` y `GetAlbum` (`db/queries/catalog.sql`) devuelven `ratings_count` y `avg_rating`, que el detalle del catálogo expone como `"ratings": {"count", "average"}`.
+
+---
+
+### 6.4 Lógica de Negocio y Casos de Uso (`RatingService` y `ReviewService`)
+
+Ubicación: `internal/core/services/rating_service.go` y `review_service.go`. Ambos dependen de los puertos de `internal/core/ports/review_ports.go`: `RatingStore`, `ReviewStore` (implementados por `*sqlc.Queries`) y `TargetResolver`.
+
+#### Resolución del objetivo (`MusicService.ResolveTarget`)
+`target_id` admite los mismos formatos que el detalle del catálogo: un entero o un ID de Spotify para canciones, y un UUID o un ID de Spotify para álbumes y artistas. `MusicService.ResolveTarget` reutiliza ese parseo y las queries `GetTrack`, `GetAlbum` y `GetArtist` para obtener el id local. Solo consulta el catálogo local: un ID de Spotify nunca importado devuelve `ErrNotFound` (404). Un `target_type` desconocido devuelve `400`.
+
+#### `RatingService`
+- **`Rate`:** valida `score` (obligatorio, de 0.5 a 5.0 y múltiplo de 0.5), resuelve el objetivo y hace el upsert. Devuelve si el voto es nuevo (`xmax = 0` en la fila devuelta), y el handler responde `201` o `200` según el caso.
+- **`GetMine`:** el voto del usuario sobre el objetivo, o `ErrNotFound`.
+- **`Delete`:** lee el voto por id: `ErrNotFound` si no existe y `ErrForbidden` si es de otro usuario. Después lo borra, y el trigger lo descuenta de las estadísticas.
+
+#### `ReviewService`
+- **Validación de texto:** aplica `strings.TrimSpace` a `title` y `content`. `content` debe tener entre 5 y 5000 caracteres (contados en runas; el mismo `CHECK` está en la BD). `title` admite hasta 200 caracteres, y si queda vacío se guarda como `NULL`.
+- **`Create`:** resuelve el objetivo e inserta. El `23505` del índice único se traduce a `ErrReviewAlreadyExists` (409).
+- **`List`:** `limit` de 1 a 50 (20 por defecto) y `page` desde 1. Devuelve `count` (reseñas de la página) y `total` (todas las del objetivo), de la más reciente a la más antigua.
+- **`Update` / `Delete`:** primero leen la reseña para distinguir `404` (no existe) de `403` (es de otro usuario). `Update` reemplaza título y contenido (semántica `PUT`).
+
+---
+
+### 6.5 Adaptadores HTTP Chi: Endpoints de Calificaciones y Reseñas
+
+Ubicación: `internal/adapters/primary/http/handlers_ratings.go`, `handlers_reviews.go` y `dto/review_dto.go`. **Todas las rutas van en el grupo protegido por `AuthMiddleware`**, igual que `/music/*`: sin sesión tampoco se puede ver el catálogo. La política de CORS (`router.go`) admite ahora `PUT` y `DELETE`.
+
+| Método | Ruta | Éxito | Descripción |
+|---|---|---|---|
+| `POST` | `/api/v1/ratings` | 201 / 200 | Crea o reemplaza el voto. Body: `target_type`, `target_id`, `score` |
+| `GET` | `/api/v1/ratings/my?target_type=&target_id=` | 200 | Voto del usuario sobre el objetivo (404 si no hay) |
+| `DELETE` | `/api/v1/ratings/{id}` | 200 | Borra un voto propio |
+| `POST` | `/api/v1/reviews` | 201 | Publica la reseña. Body: `target_type`, `target_id`, `title?`, `content` |
+| `GET` | `/api/v1/reviews?target_type=&target_id=&limit=&page=` | 200 | Reseñas del objetivo, paginadas |
+| `GET` | `/api/v1/reviews/{id}` | 200 | Detalle de una reseña |
+| `PUT` | `/api/v1/reviews/{id}` | 200 | Reemplaza `title` y `content` de una reseña propia |
+| `DELETE` | `/api/v1/reviews/{id}` | 200 | Borra una reseña propia |
+
+Todas las respuestas usan `target: {"type", "id"}` con el id local, y las reseñas (`POST`, `GET`, `PUT`) devuelven el mismo objeto completo: autor, `rating_score` y timestamps. El formato detallado está en el README (endpoints 15–22).
+
+| Error | HTTP | Mensaje |
+|---|---|---|
+| `*ValidationError`, JSON inválido, `{id}` no UUID | 400 | detalle |
+| `ErrForbidden` | 403 | `no puedes modificar un recurso de otro usuario` |
+| `ErrNotFound` | 404 | `no encontrado` |
+| `ErrReviewAlreadyExists` | 409 | `ya publicaste una reseña para este objetivo; edítala con PUT` |
+
+---
+
+## 7. Guía de Verificación y Pruebas con cURL
 
 ### 1. Levantar Contenedor y Aplicar Migraciones
 
@@ -1911,3 +2317,138 @@ docker stop mailpit-junkbox
 curl -s -X POST http://localhost:8080/api/v1/auth/password/forgot -H "Content-Type: application/json" -d '{"email":"cesar@junkbox.local"}'
 docker start mailpit-junkbox   # el correo llega en el siguiente reintento (~30 s)
 ```
+
+---
+
+### 16. Asignar Calificación con Media Estrella (`POST /api/v1/ratings`)
+
+Con `ACCESS_TOKEN` de `cesar_beltran` (paso 3), califica con 4.5 estrellas la canción 10924:
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/ratings \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"target_type":"song","target_id":"10924","score":4.5}'
+```
+
+_Respuesta esperada: `201 Created` con el voto (`score: 4.5`, `target: {"type":"song","id":"10924"}`). En la BD (`make db-shell`), `SELECT ratings_count, ratings_sum, avg_rating FROM song_metadata WHERE id = 10924;` devuelve `1 | 4.5 | 4.50`._
+
+---
+
+### 17. Validar Rechazo de Score Fuera de Rango o Paso Inválido
+
+```bash
+for s in 6.0 4.3 0; do
+  curl -s -X POST http://localhost:8080/api/v1/ratings \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"target_type\":\"song\",\"target_id\":\"10924\",\"score\":$s}"; echo
+done
+```
+
+_Respuesta esperada: `400 Bad Request` en los tres casos con `{"error":"la calificación debe estar entre 0.5 y 5.0 en incrementos de 0.5"}`. Sin `score` el mensaje es `score es requerido`, y con un `target_id` inexistente la respuesta es `404`. La BD no cambia._
+
+---
+
+### 18. Reemplazar el Voto (Upsert) y Calificar por ID de Spotify
+
+```bash
+# El mismo usuario cambia su voto a 5.0
+curl -i -X POST http://localhost:8080/api/v1/ratings \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"target_type":"song","target_id":"10924","score":5.0}'
+
+# Otro usuario califica la misma canción usando su ID de Spotify.
+# ACCESS_TOKEN_CARLOS: login de carlos_andrade como en el paso 3.
+SPOTIFY_ID="<track_id de: SELECT track_id FROM song_metadata WHERE id = 10924;>"
+curl -i -X POST http://localhost:8080/api/v1/ratings \
+  -H "Authorization: Bearer $ACCESS_TOKEN_CARLOS" \
+  -H "Content-Type: application/json" \
+  -d "{\"target_type\":\"song\",\"target_id\":\"$SPOTIFY_ID\",\"score\":3.5}"
+```
+
+_Respuesta esperada: la primera petición devuelve `200 OK` con el **mismo** `id` del paso 16 y `score: 5`. La segunda devuelve `201 Created` con `target.id: "10924"` (el ID local). La BD queda en `2 | 8.5 | 4.25`, y `GET /api/v1/music/tracks/10924` incluye `"ratings": {"count": 2, "average": 4.25}`._
+
+---
+
+### 19. Publicar Reseña y Rechazar Duplicado (`POST /api/v1/reviews`)
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/reviews \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_type": "song",
+    "target_id": "10924",
+    "title": "Excelente pieza",
+    "content": "Una interpretación magnífica y un ritmo impecable."
+  }'
+REVIEW_ID="<id de la respuesta>"
+
+# Segunda reseña del mismo usuario sobre la misma canción
+curl -i -X POST http://localhost:8080/api/v1/reviews \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"target_type":"song","target_id":"10924","content":"Otra opinión distinta"}'
+```
+
+_Respuesta esperada: `201 Created` con la reseña completa y `rating_score: 5` (el voto actual del autor); después, `409 Conflict`._
+
+---
+
+### 20. Publicar Reseña sin Calificación
+
+```bash
+ALBUM_ID="<uuid de un álbum>"
+
+curl -i -X POST http://localhost:8080/api/v1/reviews \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"target_type\": \"album\",
+    \"target_id\": \"$ALBUM_ID\",
+    \"content\": \"Aún estoy asimilando el concepto del disco, pero la producción suena impecable.\"
+  }"
+```
+
+_Respuesta esperada: `201 Created` con `title: null` y `rating_score: null`. Las estadísticas del álbum no cambian._
+
+---
+
+### 21. Listar, Editar y Autorización
+
+```bash
+curl -i "http://localhost:8080/api/v1/reviews?target_type=song&target_id=10924&limit=10&page=1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+
+# Otro usuario intenta editar o borrar la reseña
+curl -i -X PUT "http://localhost:8080/api/v1/reviews/$REVIEW_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN_CARLOS" \
+  -H "Content-Type: application/json" \
+  -d '{"content":"Edición ajena"}'
+
+# El autor la edita (sin title: queda sin título)
+curl -i -X PUT "http://localhost:8080/api/v1/reviews/$REVIEW_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"content":"Tras escucharla varias veces más, sigue siendo una joya."}'
+```
+
+_Respuesta esperada: el listado devuelve `200 OK` con `count: 1`, `total: 1` y el autor de cada reseña; la edición ajena, `403 Forbidden`; y la del autor, `200 OK` con `title: null` y `updated_at` actualizado. `limit=0` o `page=0` devuelven `400`._
+
+---
+
+### 22. Eliminar Calificación y Verificar el Trigger
+
+```bash
+RATING_ID="<id del voto del paso 16>"
+curl -i -X DELETE "http://localhost:8080/api/v1/ratings/$RATING_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+curl -i "http://localhost:8080/api/v1/reviews/$REVIEW_ID" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+_Respuesta esperada: `200 OK {"message": "calificación eliminada"}`. La BD pasa a `1 | 3.5 | 3.50` (solo queda el voto de carlos), y la reseña se conserva con `rating_score: null`. Al borrar también el último voto, la BD queda en `0 | 0.0 | NULL`, y el detalle de la canción muestra `"ratings": {"count": 0, "average": null}`._
+
+**Concurrencia:** lanza muchos `POST /ratings` en paralelo sobre el mismo objetivo con varios usuarios del seed (p. ej. `xargs -P 20`). Después compara `ratings_count, ratings_sum, avg_rating` del objetivo con `SELECT count(*), sum(score), round(avg(score), 2) FROM ratings WHERE ...`: deben coincidir.

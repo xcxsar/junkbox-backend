@@ -175,6 +175,10 @@ func writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusUnauthorized, "token inválido o expirado")
 	case errors.Is(err, domain.ErrUserAlreadyExists):
 		writeError(w, http.StatusConflict, "el email o el username ya están registrados")
+	case errors.Is(err, domain.ErrReviewAlreadyExists):
+		writeError(w, http.StatusConflict, "ya publicaste una reseña para este objetivo; edítala con PUT")
+	case errors.Is(err, domain.ErrForbidden):
+		writeError(w, http.StatusForbidden, "no puedes modificar un recurso de otro usuario")
 	case errors.Is(err, domain.ErrNotFound):
 		writeError(w, http.StatusNotFound, "no encontrado")
 	case errors.Is(err, domain.ErrMusicProviderUnavailable):

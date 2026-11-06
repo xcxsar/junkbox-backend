@@ -313,6 +313,14 @@ El backend utiliza tokens de acceso **JWT HS256** (15 minutos de vigencia) con c
 | `GET` | `/api/v1/music/tracks/{id}` | Bearer | Detalle de canción, métricas acústicas y estado de embedding |
 | `GET` | `/api/v1/music/artists/{id}` | Bearer | Detalle de artista y catálogo relacionado |
 | `GET` | `/api/v1/music/albums/{id}` | Bearer | Detalle de álbum y pistas asociadas |
+| `POST` | `/api/v1/ratings` | Bearer | Asigna o reemplaza el voto del usuario (0.5 a 5.0 en pasos de 0.5) |
+| `GET` | `/api/v1/ratings/my` | Bearer | Voto del usuario autenticado sobre una canción, álbum o artista |
+| `DELETE` | `/api/v1/ratings/{id}` | Bearer | Elimina un voto del usuario |
+| `POST` | `/api/v1/reviews` | Bearer | Publica la reseña del usuario (una por objetivo) |
+| `GET` | `/api/v1/reviews` | Bearer | Reseñas de una canción, álbum o artista, paginadas |
+| `GET` | `/api/v1/reviews/{id}` | Bearer | Detalle de una reseña con su autor y el voto del autor |
+| `PUT` | `/api/v1/reviews/{id}` | Bearer | Edita una reseña del usuario |
+| `DELETE` | `/api/v1/reviews/{id}` | Bearer | Elimina una reseña del usuario |
 
 ---
 
@@ -642,7 +650,7 @@ curl -i -X GET "http://localhost:8080/api/v1/music/search?q=Espresso%20Sabrina%2
 #### 12. Detalle de Canción (`GET /api/v1/music/tracks/{id}`)
 Devuelve los metadatos completos de una canción: atributos acústicos y si ya tiene vector de recomendación (`has_embedding`).
 
-El parámetro `{id}` puede ser el ID de Spotify o el ID entero local. `audio_features` es `null` mientras la canción no tenga ninguno.
+El parámetro `{id}` puede ser el ID de Spotify o el ID entero local. `audio_features` es `null` mientras la canción no tenga ninguno. `ratings` resume las calificaciones de los usuarios: `average` es `null` mientras no haya votos (ver endpoint 15).
 
 En las canciones importadas desde Spotify, los atributos vienen de FreqBlog: `speechiness`, `liveness` y `time_signature` quedan en `null`, porque FreqBlog no los mide, y en el vector se usa la mediana del catálogo.
 
@@ -681,14 +689,15 @@ curl -i -X GET "http://localhost:8080/api/v1/music/tracks/2qSkXiYOKEzfk3vhRpIQUR
     "valence": 0.69,
     "tempo": 104.0,
     "time_signature": null
-  }
+  },
+  "ratings": { "count": 2, "average": 4.25 }
 }
 ```
 
 ---
 
 #### 13. Detalle de Artista (`GET /api/v1/music/artists/{id}`)
-Obtiene los datos del artista (géneros, popularidad, imagen) por ID de Spotify o UUID local. Los artistas que vienen del CSV no tienen `spotify_id` hasta que una búsqueda en Spotify los "reclama" por nombre. `popularity` es `null` si Spotify no la envía.
+Obtiene los datos del artista (géneros, popularidad, imagen y `ratings`) por ID de Spotify o UUID local. Los artistas que vienen del CSV no tienen `spotify_id` hasta que una búsqueda en Spotify los "reclama" por nombre. `popularity` es `null` si Spotify no la envía.
 
 ```bash
 curl -i -X GET "http://localhost:8080/api/v1/music/artists/74KM79TiuVKeVCqs8QtB0B" \
@@ -704,14 +713,15 @@ curl -i -X GET "http://localhost:8080/api/v1/music/artists/74KM79TiuVKeVCqs8QtB0
   "genres": ["dance pop", "pop"],
   "popularity": null,
   "image_url": "https://i.scdn.co/image/ab6761610000e5eb...",
-  "created_at": "2026-10-31T12:00:00Z"
+  "created_at": "2026-10-31T12:00:00Z",
+  "ratings": { "count": 0, "average": null }
 }
 ```
 
 ---
 
 #### 14. Detalle de Álbum (`GET /api/v1/music/albums/{id}`)
-Obtiene los datos del álbum, su carátula, su artista y sus pistas (las que ya están en el catálogo local), por ID de Spotify o UUID local.
+Obtiene los datos del álbum, su carátula, su artista, sus `ratings` y sus pistas (las que ya están en el catálogo local), por ID de Spotify o UUID local.
 
 ```bash
 curl -i -X GET "http://localhost:8080/api/v1/music/albums/2lIZef49vdWi0LMePaA4Sp" \
@@ -731,6 +741,7 @@ curl -i -X GET "http://localhost:8080/api/v1/music/albums/2lIZef49vdWi0LMePaA4Sp
   "image_url": "https://i.scdn.co/image/ab67616d0000b273...",
   "total_tracks": 12,
   "created_at": "2026-10-31T12:00:00Z",
+  "ratings": { "count": 1, "average": 5.0 },
   "tracks": [
     {
       "id": 1159765,
@@ -751,6 +762,206 @@ curl -i -X GET "http://localhost:8080/api/v1/music/albums/2lIZef49vdWi0LMePaA4Sp
 
 ---
 
+#### 15. Asignar o Editar Calificación (`POST /api/v1/ratings`)
+Asigna o reemplaza el voto del usuario sobre una canción, un álbum o un artista. Cada usuario tiene un solo voto por objetivo: votar de nuevo reemplaza el puntaje (`UPSERT`). Un trigger de PostgreSQL actualiza `ratings.count` y `ratings.average` del objetivo en la misma transacción.
+
+**Cuerpo de la petición (JSON):**
+- `target_type` (string, obligatorio): `"song"`, `"album"` o `"artist"`.
+- `target_id` (string, obligatorio): el mismo formato que el detalle del catálogo: ID entero local o ID de Spotify (canciones), y UUID local o ID de Spotify (álbumes y artistas). El objetivo debe existir en el catálogo local; un ID de Spotify nunca importado devuelve `404`.
+- `score` (number, obligatorio): de `0.5` a `5.0` en incrementos de `0.5` (medias estrellas).
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/ratings \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_type": "song",
+    "target_id": "10924",
+    "score": 4.5
+  }'
+```
+
+**Respuesta (`201 Created` si el voto es nuevo, `200 OK` si reemplaza uno anterior):**
+```json
+{
+  "id": "e5000000-0000-0000-0000-000000000001",
+  "user_id": "b1000000-0000-0000-0000-000000000001",
+  "target": { "type": "song", "id": "10924" },
+  "score": 4.5,
+  "created_at": "2026-11-04T12:00:00Z",
+  "updated_at": "2026-11-04T12:00:00Z"
+}
+```
+
+`target.id` es siempre el ID local, aunque la petición haya usado el de Spotify.
+
+---
+
+#### 16. Consultar Mi Calificación (`GET /api/v1/ratings/my`)
+Obtiene el voto del usuario autenticado sobre un objetivo. Recibe `target_type` y `target_id` como query params, con el mismo formato que en el endpoint 15. Si el usuario no ha calificado ese objetivo, responde `404`.
+
+```bash
+curl -i -X GET "http://localhost:8080/api/v1/ratings/my?target_type=song&target_id=10924" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+**Respuesta (`200 OK`):** el mismo objeto que devuelve el endpoint 15.
+
+---
+
+#### 17. Eliminar Calificación (`DELETE /api/v1/ratings/{id}`)
+Elimina un voto del usuario autenticado; el trigger lo descuenta de las estadísticas. Las reseñas del usuario sobre ese objetivo se conservan y pasan a mostrar `rating_score: null`. Responde `403` si el voto es de otro usuario y `404` si no existe.
+
+```bash
+curl -i -X DELETE http://localhost:8080/api/v1/ratings/e5000000-0000-0000-0000-000000000001 \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+**Respuesta (`200 OK`):**
+```json
+{
+  "message": "calificación eliminada"
+}
+```
+
+---
+
+#### 18. Publicar Reseña (`POST /api/v1/reviews`)
+Publica la reseña del usuario sobre una canción, un álbum o un artista. Se puede reseñar sin calificar. El puntaje que acompaña a la reseña (`rating_score`) es el voto actual del autor sobre el mismo objetivo, o `null` si no lo ha calificado. Cada usuario puede publicar una sola reseña por objetivo: una segunda responde `409`, y para cambiarla se usa el endpoint 21.
+
+**Cuerpo de la petición (JSON):**
+- `target_type` (string, obligatorio): `"song"`, `"album"` o `"artist"`.
+- `target_id` (string, obligatorio): el mismo formato que en el endpoint 15.
+- `title` (string, opcional): máximo 200 caracteres. Si se omite o va vacío, la reseña queda sin título.
+- `content` (string, obligatorio): de 5 a 5000 caracteres, sin contar los espacios de los extremos (se recortan).
+
+```bash
+curl -i -X POST http://localhost:8080/api/v1/reviews \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "target_type": "song",
+    "target_id": "10924",
+    "title": "Excelente pieza",
+    "content": "Una interpretación magnífica y un ritmo impecable."
+  }'
+```
+
+**Respuesta (`201 Created`):**
+```json
+{
+  "id": "f5000000-0000-0000-0000-000000000001",
+  "target": { "type": "song", "id": "10924" },
+  "title": "Excelente pieza",
+  "content": "Una interpretación magnífica y un ritmo impecable.",
+  "rating_score": 4.5,
+  "likes_count": 0,
+  "author": {
+    "id": "b1000000-0000-0000-0000-000000000001",
+    "username": "cesar_beltran",
+    "display_name": "César David Beltrán Loredo",
+    "avatar_url": "https://api.dicebear.com/7.x/bottts/svg?seed=cesar"
+  },
+  "created_at": "2026-11-04T12:00:00Z",
+  "updated_at": "2026-11-04T12:00:00Z"
+}
+```
+
+`likes_count` está reservado para una fase futura y por ahora siempre vale `0`. Los endpoints 18, 20 y 21 devuelven este mismo objeto.
+
+---
+
+#### 19. Listar Reseñas de un Objetivo (`GET /api/v1/reviews`)
+Devuelve las reseñas de una canción, un álbum o un artista, de la más reciente a la más antigua.
+
+**Parámetros de consulta (Query params):**
+- `target_type` (string, obligatorio): `"song"`, `"album"` o `"artist"`.
+- `target_id` (string, obligatorio): el mismo formato que en el endpoint 15.
+- `limit` (int, opcional): de 1 a 50; por defecto `20`.
+- `page` (int, opcional): empieza en 1; por defecto `1`.
+
+```bash
+curl -i -X GET "http://localhost:8080/api/v1/reviews?target_type=song&target_id=10924&limit=10&page=1" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+**Respuesta (`200 OK`):** `count` es el número de reseñas de esta página y `total` el de todas las del objetivo.
+```json
+{
+  "target": { "type": "song", "id": "10924" },
+  "page": 1,
+  "limit": 10,
+  "count": 1,
+  "total": 1,
+  "reviews": [
+    {
+      "id": "f5000000-0000-0000-0000-000000000001",
+      "target": { "type": "song", "id": "10924" },
+      "title": "Excelente pieza",
+      "content": "Una interpretación magnífica y un ritmo impecable.",
+      "rating_score": 4.5,
+      "likes_count": 0,
+      "author": {
+        "id": "b1000000-0000-0000-0000-000000000001",
+        "username": "cesar_beltran",
+        "display_name": "César David Beltrán Loredo",
+        "avatar_url": "https://api.dicebear.com/7.x/bottts/svg?seed=cesar"
+      },
+      "created_at": "2026-11-04T12:00:00Z",
+      "updated_at": "2026-11-04T12:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+#### 20. Detalle de Reseña (`GET /api/v1/reviews/{id}`)
+Consulta una reseña por su UUID.
+
+```bash
+curl -i -X GET http://localhost:8080/api/v1/reviews/f5000000-0000-0000-0000-000000000001 \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+**Respuesta (`200 OK`):** el mismo objeto que devuelve el endpoint 18.
+
+---
+
+#### 21. Editar Reseña (`PUT /api/v1/reviews/{id}`)
+Reemplaza el título y el contenido de una reseña, con las mismas reglas que el endpoint 18. Si se omite `title`, la reseña queda sin título. Solo puede editarla su autor (`403` en otro caso).
+
+```bash
+curl -i -X PUT http://localhost:8080/api/v1/reviews/f5000000-0000-0000-0000-000000000001 \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "title": "Excelente pieza (actualizada)",
+    "content": "Tras escucharla varias veces más, sigue siendo una joya inolvidable."
+  }'
+```
+
+**Respuesta (`200 OK`):** la reseña completa, con el mismo formato que el endpoint 18 y `updated_at` actualizado.
+
+---
+
+#### 22. Eliminar Reseña (`DELETE /api/v1/reviews/{id}`)
+Elimina una reseña del usuario autenticado. Responde `403` si la reseña es de otro usuario y `404` si no existe.
+
+```bash
+curl -i -X DELETE http://localhost:8080/api/v1/reviews/f5000000-0000-0000-0000-000000000001 \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+**Respuesta (`200 OK`):**
+```json
+{
+  "message": "reseña eliminada"
+}
+```
+
+---
+
 ### Formato Estándar de Errores
 
 Todas las respuestas con error devuelven formato JSON uniforme:
@@ -761,11 +972,12 @@ Todas las respuestas con error devuelven formato JSON uniforme:
 }
 ```
 
-- `400 Bad Request`: parámetros faltantes, JSON malformado o campos con formato inválido (p. ej. `type` distinto de `track`/`artist`/`album`, `limit` fuera de 1–50 o un `{id}` que no es ni un ID local ni un ID de Spotify).
+- `400 Bad Request`: parámetros faltantes, JSON malformado (incluidos campos desconocidos) o campos con formato inválido (p. ej. `type` distinto de `track`/`artist`/`album`, `target_type` distinto de `song`/`album`/`artist`, `limit` fuera de 1–50, un `{id}` o `target_id` que no es ni un ID local ni un ID de Spotify, `score` fuera de 0.5–5.0 o que no es múltiplo de 0.5, o `content` de reseña fuera de 5–5000 caracteres).
 - `401 Unauthorized`: Token ausente, firma expirada, token en denylist, refresh token ya utilizado, o token de correo (recuperación/verificación) inválido, usado o expirado.
-- `404 Not Found`: Canción, artista o álbum no encontrado.
-- `409 Conflict`: `username` o `email` ya registrado.
+- `403 Forbidden`: intento de editar o borrar una calificación o reseña de otro usuario.
+- `404 Not Found`: canción, artista, álbum, calificación o reseña no encontrada (incluye un `target_id` de Spotify que no está en el catálogo local y `GET /ratings/my` sin voto).
+- `409 Conflict`: `username` o `email` ya registrado, o segunda reseña del mismo usuario sobre el mismo objetivo.
 - `500 Internal Server Error`: fallo de conexión con la base de datos u otro error interno.
 - `502 Bad Gateway`: no hay resultados locales y Spotify falló (`servicio de música no disponible`).
 
-Para una guía de verificación completa paso a paso con scripts automatizados de prueba, consulta [`implementacion.md`](implementacion.md#6-guía-de-verificación-y-pruebas-con-curl).
+Para una guía de verificación completa paso a paso con scripts automatizados de prueba, consulta [`implementacion.md`](implementacion.md#7-guía-de-verificación-y-pruebas-con-curl).

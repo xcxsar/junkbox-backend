@@ -66,3 +66,38 @@ func TestCORSPeticionSimple(t *testing.T) {
 		}
 	}
 }
+
+func TestCORSPreflightPutDelete(t *testing.T) {
+	h := newTestRouter([]string{frontendOrigin})
+	for _, method := range []string{http.MethodPut, http.MethodDelete} {
+		req := httptest.NewRequest(http.MethodOptions, "/api/v1/reviews/f5000000-0000-0000-0000-000000000001", nil)
+		req.Header.Set("Origin", frontendOrigin)
+		req.Header.Set("Access-Control-Request-Method", method)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if got := rec.Header().Get("Access-Control-Allow-Methods"); got != method {
+			t.Errorf("preflight %s: Allow-Methods = %q", method, got)
+		}
+	}
+}
+
+func TestRatingsYReviewsRequierenBearer(t *testing.T) {
+	h := NewRouter(RouterOptions{Auth: &AuthHandler{}, Ratings: &RatingHandler{}, Reviews: &ReviewHandler{}})
+	routes := []struct{ method, path string }{
+		{http.MethodPost, "/api/v1/ratings"},
+		{http.MethodGet, "/api/v1/ratings/my"},
+		{http.MethodDelete, "/api/v1/ratings/e5000000-0000-0000-0000-000000000001"},
+		{http.MethodPost, "/api/v1/reviews"},
+		{http.MethodGet, "/api/v1/reviews"},
+		{http.MethodGet, "/api/v1/reviews/f5000000-0000-0000-0000-000000000001"},
+		{http.MethodPut, "/api/v1/reviews/f5000000-0000-0000-0000-000000000001"},
+		{http.MethodDelete, "/api/v1/reviews/f5000000-0000-0000-0000-000000000001"},
+	}
+	for _, rt := range routes {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(rt.method, rt.path, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s sin token: status %d, esperaba 401", rt.method, rt.path, rec.Code)
+		}
+	}
+}

@@ -56,28 +56,34 @@ func (ns NullEmailTokenPurpose) Value() (driver.Value, error) {
 }
 
 type Album struct {
-	ID          uuid.UUID      `json:"id"`
-	SpotifyID   sql.NullString `json:"spotify_id"`
-	Title       string         `json:"title"`
-	ArtistID    *uuid.UUID     `json:"artist_id"`
-	ArtistName  string         `json:"artist_name"`
-	ReleaseYear sql.NullInt32  `json:"release_year"`
-	AlbumType   string         `json:"album_type"`
-	ImageUrl    sql.NullString `json:"image_url"`
-	TotalTracks int32          `json:"total_tracks"`
-	CreatedAt   time.Time      `json:"created_at"`
-	UpdatedAt   time.Time      `json:"updated_at"`
+	ID           uuid.UUID      `json:"id"`
+	SpotifyID    sql.NullString `json:"spotify_id"`
+	Title        string         `json:"title"`
+	ArtistID     *uuid.UUID     `json:"artist_id"`
+	ArtistName   string         `json:"artist_name"`
+	ReleaseYear  sql.NullInt32  `json:"release_year"`
+	AlbumType    string         `json:"album_type"`
+	ImageUrl     sql.NullString `json:"image_url"`
+	TotalTracks  int32          `json:"total_tracks"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	RatingsCount int32          `json:"ratings_count"`
+	RatingsSum   float64        `json:"ratings_sum"`
+	AvgRating    *float64       `json:"avg_rating"`
 }
 
 type Artist struct {
-	ID         uuid.UUID      `json:"id"`
-	SpotifyID  sql.NullString `json:"spotify_id"`
-	Name       string         `json:"name"`
-	Genres     []string       `json:"genres"`
-	Popularity sql.NullInt32  `json:"popularity"`
-	ImageUrl   sql.NullString `json:"image_url"`
-	CreatedAt  time.Time      `json:"created_at"`
-	UpdatedAt  time.Time      `json:"updated_at"`
+	ID           uuid.UUID      `json:"id"`
+	SpotifyID    sql.NullString `json:"spotify_id"`
+	Name         string         `json:"name"`
+	Genres       []string       `json:"genres"`
+	Popularity   sql.NullInt32  `json:"popularity"`
+	ImageUrl     sql.NullString `json:"image_url"`
+	CreatedAt    time.Time      `json:"created_at"`
+	UpdatedAt    time.Time      `json:"updated_at"`
+	RatingsCount int32          `json:"ratings_count"`
+	RatingsSum   float64        `json:"ratings_sum"`
+	AvgRating    *float64       `json:"avg_rating"`
 }
 
 type EmailOutbox struct {
@@ -94,6 +100,17 @@ type EmailOutbox struct {
 	CreatedAt     time.Time      `json:"created_at"`
 }
 
+type Rating struct {
+	ID        uuid.UUID     `json:"id"`
+	UserID    uuid.UUID     `json:"user_id"`
+	SongID    sql.NullInt32 `json:"song_id"`
+	AlbumID   *uuid.UUID    `json:"album_id"`
+	ArtistID  *uuid.UUID    `json:"artist_id"`
+	Score     float64       `json:"score"`
+	CreatedAt time.Time     `json:"created_at"`
+	UpdatedAt time.Time     `json:"updated_at"`
+}
+
 type RefreshToken struct {
 	ID         uuid.UUID    `json:"id"`
 	UserID     uuid.UUID    `json:"user_id"`
@@ -104,6 +121,19 @@ type RefreshToken struct {
 	RevokedAt  sql.NullTime `json:"revoked_at"`
 	ExpiresAt  time.Time    `json:"expires_at"`
 	CreatedAt  time.Time    `json:"created_at"`
+}
+
+type Review struct {
+	ID         uuid.UUID      `json:"id"`
+	UserID     uuid.UUID      `json:"user_id"`
+	SongID     sql.NullInt32  `json:"song_id"`
+	AlbumID    *uuid.UUID     `json:"album_id"`
+	ArtistID   *uuid.UUID     `json:"artist_id"`
+	Title      sql.NullString `json:"title"`
+	Content    string         `json:"content"`
+	LikesCount int32          `json:"likes_count"`
+	CreatedAt  time.Time      `json:"created_at"`
+	UpdatedAt  time.Time      `json:"updated_at"`
 }
 
 type RevokedAccessToken struct {
@@ -142,6 +172,9 @@ type SongMetadatum struct {
 	PendingEmbedding       bool            `json:"pending_embedding"`
 	EmbeddingAttempts      int32           `json:"embedding_attempts"`
 	NextEmbeddingAttemptAt sql.NullTime    `json:"next_embedding_attempt_at"`
+	RatingsCount           int32           `json:"ratings_count"`
+	RatingsSum             float64         `json:"ratings_sum"`
+	AvgRating              *float64        `json:"avg_rating"`
 }
 
 type User struct {
