@@ -163,14 +163,24 @@ RETURNING
 
 -- --- Worker de embeddings ---
 
--- name: ListPendingEmbeddingTracks :many
-SELECT track_id, isrc, embedding_attempts
-FROM song_metadata
-WHERE pending_embedding = TRUE
-  AND embedding_attempts < sqlc.arg(max_attempts)::int
-  AND (next_embedding_attempt_at IS NULL OR next_embedding_attempt_at <= NOW())
-ORDER BY next_embedding_attempt_at NULLS FIRST, id
-LIMIT sqlc.arg(max_results);
+-- ClaimPendingEmbeddingTracks reserva los pendientes vencidos con un lease:
+-- adelanta next_embedding_attempt_at para que las demás réplicas no los
+-- tomen (SKIP LOCKED evita esperar a las que los están reservando). Si la
+-- réplica muere, otra los recoge cuando vence el lease.
+-- name: ClaimPendingEmbeddingTracks :many
+UPDATE song_metadata s
+SET next_embedding_attempt_at = NOW() + make_interval(secs => sqlc.arg(lease_seconds)::float8)
+WHERE s.id IN (
+    SELECT p.id
+    FROM song_metadata p
+    WHERE p.pending_embedding = TRUE
+      AND p.embedding_attempts < sqlc.arg(max_attempts)::int
+      AND (p.next_embedding_attempt_at IS NULL OR p.next_embedding_attempt_at <= NOW())
+    ORDER BY p.next_embedding_attempt_at NULLS FIRST, p.id
+    LIMIT sqlc.arg(max_results)
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING s.track_id, s.isrc, s.embedding_attempts;
 
 -- name: UpdateSongAudioFeaturesAndEmbedding :execrows
 UPDATE song_metadata

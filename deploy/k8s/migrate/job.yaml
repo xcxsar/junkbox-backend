@@ -1,0 +1,23 @@
+# Aplica las migraciones (goose up) una sola vez, antes de las réplicas.
+# Un Job es inmutable: `make k8s-migrate` lo borra y lo vuelve a crear.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate
+spec:
+  backoffLimit: 3
+  template:
+    spec:
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: migrate
+          image: junkbox-migrate:dev
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: GOOSE_DBSTRING
+              valueFrom:
+                secretKeyRef:
+                  name: junkbox-common
+                  key: DATABASE_URL

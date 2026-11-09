@@ -1,0 +1,14 @@
+# Selecciona los pods de las 4 réplicas (label app=backend): Envoy toma de
+# aquí los endpoints entre los que reparte las peticiones.
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend
+spec:
+  type: ClusterIP
+  selector:
+    app: backend
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http

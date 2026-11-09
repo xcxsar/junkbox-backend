@@ -16,15 +16,17 @@ import (
 
 type fakeEmbeddingStore struct {
 	mu       sync.Mutex
-	pending  []sqlc.ListPendingEmbeddingTracksRow
+	pending  []sqlc.ClaimPendingEmbeddingTracksRow
+	claims   []sqlc.ClaimPendingEmbeddingTracksParams
 	updates  []sqlc.UpdateSongAudioFeaturesAndEmbeddingParams
 	failures []sqlc.MarkEmbeddingAttemptFailedParams
 	medians  sqlc.GetCatalogFeatureMediansRow
 }
 
-func (f *fakeEmbeddingStore) ListPendingEmbeddingTracks(_ context.Context, _ sqlc.ListPendingEmbeddingTracksParams) ([]sqlc.ListPendingEmbeddingTracksRow, error) {
+func (f *fakeEmbeddingStore) ClaimPendingEmbeddingTracks(_ context.Context, arg sqlc.ClaimPendingEmbeddingTracksParams) ([]sqlc.ClaimPendingEmbeddingTracksRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.claims = append(f.claims, arg)
 	rows := f.pending
 	f.pending = nil
 	return rows, nil
@@ -243,7 +245,7 @@ func TestWorkerErrorDelProveedorNoConsumeIntentos(t *testing.T) {
 }
 
 func TestWorkerReanudaPendientesAlArrancar(t *testing.T) {
-	store := &fakeEmbeddingStore{pending: []sqlc.ListPendingEmbeddingTracksRow{
+	store := &fakeEmbeddingStore{pending: []sqlc.ClaimPendingEmbeddingTracksRow{
 		{TrackID: nullStr("track1"), Isrc: nullStr("ISRC00000001")},
 	}}
 	provider := &fakeFeaturesProvider{known: map[string]*domain.AudioFeatures{"ISRC00000001": sampleFeatures()}}
@@ -283,7 +285,7 @@ func TestEnqueueDescartaAgotadosYColaLlena(t *testing.T) {
 func nullStr(s string) sql.NullString { return sql.NullString{String: s, Valid: true} }
 
 func TestWorkerNoReconsultaLoQueYaProcesoElRescan(t *testing.T) {
-	store := &fakeEmbeddingStore{pending: []sqlc.ListPendingEmbeddingTracksRow{
+	store := &fakeEmbeddingStore{pending: []sqlc.ClaimPendingEmbeddingTracksRow{
 		{TrackID: nullStr("track1")},
 		{TrackID: nullStr("track2")},
 	}}
@@ -301,5 +303,25 @@ func TestWorkerNoReconsultaLoQueYaProcesoElRescan(t *testing.T) {
 	}
 	if u, f := store.counts(); u != 1 || f != 1 {
 		t.Fatalf("updates=%d failures=%d, se esperaba 1 y 1", u, f)
+	}
+}
+
+func TestRescanReservaConLeaseYNoReservaEnPausa(t *testing.T) {
+	store := &fakeEmbeddingStore{}
+	w := NewAudioFeaturesWorker(&fakeFeaturesProvider{}, store, AudioFeaturesWorkerConfig{BatchSize: 5, LeaseDuration: 2 * time.Minute})
+
+	w.rescan(context.Background())
+	if len(store.claims) != 1 {
+		t.Fatalf("claims = %d, se esperaba 1", len(store.claims))
+	}
+	if c := store.claims[0]; c.LeaseSeconds != 120 || c.MaxResults != 50 {
+		t.Fatalf("claim = %+v, se esperaba lease 120s y 50 resultados", c)
+	}
+
+	// En pausa, una reserva vencería antes de poder enviarse.
+	w.pausedUntil = time.Now().Add(time.Minute)
+	w.rescan(context.Background())
+	if len(store.claims) != 1 {
+		t.Fatalf("no debía reservar pendientes con el proveedor en pausa (claims=%d)", len(store.claims))
 	}
 }

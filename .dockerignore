@@ -1,0 +1,11 @@
+# Contexto de build mínimo: el dataset (~175 MB) y los secretos no entran a la imagen.
+.git
+dataset.csv
+data
+.env
+.env.*
+deploy
+bin
+tmp
+*.log
+*.md

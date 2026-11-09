@@ -1,0 +1,17 @@
+# Réplica 1: Deployment backend-1 con la clave de FreqBlog del Secret freqblog-1.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../backend
+nameSuffix: "-1"
+labels:
+  - pairs:
+      replica: "1"
+    includeSelectors: true
+patches:
+  - target:
+      kind: Deployment
+    patch: |-
+      - op: replace
+        path: /spec/template/spec/containers/0/envFrom/2/secretRef/name
+        value: freqblog-1

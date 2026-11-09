@@ -1,6 +1,6 @@
 # Guía de Implementación del Backend de Junkbox
 
-Este documento establece la especificación técnica, diseño de arquitectura y guía paso a paso para la implementación de las **Fases 1, 2, 3 y 4** del backend de **Junkbox** en **Go**.
+Este documento establece la especificación técnica, diseño de arquitectura y guía paso a paso para la implementación de las **Fases 1 a 5** del backend de **Junkbox** en **Go**.
 
 ---
 
@@ -47,6 +47,17 @@ Este documento establece la especificación técnica, diseño de arquitectura y 
   - [6.4 Lógica de Negocio y Casos de Uso (`RatingService` y `ReviewService`)](#64-lógica-de-negocio-y-casos-de-uso-ratingservice-y-reviewservice)
   - [6.5 Adaptadores HTTP Chi: Endpoints de Calificaciones y Reseñas](#65-adaptadores-http-chi-endpoints-de-calificaciones-y-reseñas)
 - [7. Guía de Verificación y Pruebas con cURL](#7-guía-de-verificación-y-pruebas-con-curl)
+- [8. Fase 5: Multi-réplica en Kubernetes (kind)](#8-fase-5-multi-réplica-en-kubernetes-kind)
+  - [8.1 Arquitectura y Diagrama de Contenedores](#81-arquitectura-y-diagrama-de-contenedores)
+  - [8.2 Qué Ya Soportaba Varias Réplicas](#82-qué-ya-soportaba-varias-réplicas)
+  - [8.3 Worker de Embeddings con Varias Réplicas: Claim con Lease](#83-worker-de-embeddings-con-varias-réplicas-claim-con-lease)
+  - [8.4 Imágenes: `Dockerfile` y `.dockerignore`](#84-imágenes-dockerfile-y-dockerignore)
+  - [8.5 Postgres y Mailpit Fuera del Cluster](#85-postgres-y-mailpit-fuera-del-cluster)
+  - [8.6 Manifiestos (`deploy/k8s/`)](#86-manifiestos-deployk8s)
+  - [8.7 Secretos](#87-secretos)
+  - [8.8 Automatización con `Makefile`](#88-automatización-con-makefile)
+  - [8.9 Decisiones](#89-decisiones)
+  - [8.10 Verificación](#810-verificación)
 
 ---
 
@@ -1448,14 +1459,24 @@ RETURNING
 
 -- --- Worker de embeddings ---
 
--- name: ListPendingEmbeddingTracks :many
-SELECT track_id, isrc, embedding_attempts
-FROM song_metadata
-WHERE pending_embedding = TRUE
-  AND embedding_attempts < sqlc.arg(max_attempts)::int
-  AND (next_embedding_attempt_at IS NULL OR next_embedding_attempt_at <= NOW())
-ORDER BY next_embedding_attempt_at NULLS FIRST, id
-LIMIT sqlc.arg(max_results);
+-- ClaimPendingEmbeddingTracks reserva los pendientes vencidos con un lease:
+-- adelanta next_embedding_attempt_at para que las demás réplicas no los
+-- tomen (SKIP LOCKED evita esperar a las que los están reservando). Si la
+-- réplica muere, otra los recoge cuando vence el lease.
+-- name: ClaimPendingEmbeddingTracks :many
+UPDATE song_metadata s
+SET next_embedding_attempt_at = NOW() + make_interval(secs => sqlc.arg(lease_seconds)::float8)
+WHERE s.id IN (
+    SELECT p.id
+    FROM song_metadata p
+    WHERE p.pending_embedding = TRUE
+      AND p.embedding_attempts < sqlc.arg(max_attempts)::int
+      AND (p.next_embedding_attempt_at IS NULL OR p.next_embedding_attempt_at <= NOW())
+    ORDER BY p.next_embedding_attempt_at NULLS FIRST, p.id
+    LIMIT sqlc.arg(max_results)
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING s.track_id, s.isrc, s.embedding_attempts;
 
 -- name: UpdateSongAudioFeaturesAndEmbedding :execrows
 UPDATE song_metadata
@@ -1548,7 +1569,7 @@ Regla para resolver el artista (`upsertArtist`):
 - **Cola:** canal de 5.000 `EmbeddingJob{TrackID, ISRC, Attempts}`. `Enqueue` no bloquea: si la cola está llena descarta el job, que sigue con `pending_embedding = TRUE` en la BD.
 - **Lotes:** se envían al juntar **50 canciones** o cada **2 s**. El búfer deduplica por `track_id`.
 - **Duplicados:** una canción puede llegar por la cola (búsqueda) y por el rescan. El worker recuerda durante 1 h las canciones ya procesadas y descarta las que vuelven a llegar por la cola, para no gastar cuota de FreqBlog dos veces. Además, `MarkEmbeddingAttemptFailed` solo suma si `embedding_attempts` sigue siendo el que vio el job (control optimista), así que un mismo fallo nunca cuenta doble.
-- **Reanudación:** al arrancar y cada **1 min** relee `ListPendingEmbeddingTracks` (pendientes con `embedding_attempts < 5` cuyo `next_embedding_attempt_at` ya venció). Así recupera lo que quedó de una ejecución anterior y lo que se descartó por cola llena.
+- **Reanudación:** al arrancar y cada **1 min** reserva con `ClaimPendingEmbeddingTracks` los pendientes con `embedding_attempts < 5` cuyo `next_embedding_attempt_at` ya venció. Así recupera lo que quedó de una ejecución anterior y lo que se descartó por cola llena. La reserva es un *lease* de **5 min** (`LeaseDuration`): con varias réplicas, cada pendiente lo consulta una sola (ver [8.3](#83-worker-de-embeddings-con-varias-réplicas-claim-con-lease)). No reserva más mientras el proveedor está en pausa o el búfer ya tiene 500 canciones, porque el lease vencería antes de enviarlas.
 - **Sin resultado (`null`):** `MarkEmbeddingAttemptFailed` suma un intento y programa el siguiente con backoff `30 s · 2^intentos` (30 s, 1 min, 2 min, 4 min, 8 min). Tras **5 intentos** la canción deja de reintentarse y queda con `pending_embedding = TRUE`.
 - **Error del proveedor:** el worker se pausa durante `Retry-After` o, si no viene, 1 min. **No consume intentos** y el lote se reintenta completo.
 - **Vector:** se calcula en `BuildEmbedding`, con la misma normalización MinMax que la ingesta histórica:
@@ -2452,3 +2473,256 @@ curl -i "http://localhost:8080/api/v1/reviews/$REVIEW_ID" \
 _Respuesta esperada: `200 OK {"message": "calificación eliminada"}`. La BD pasa a `1 | 3.5 | 3.50` (solo queda el voto de carlos), y la reseña se conserva con `rating_score: null`. Al borrar también el último voto, la BD queda en `0 | 0.0 | NULL`, y el detalle de la canción muestra `"ratings": {"count": 0, "average": null}`._
 
 **Concurrencia:** lanza muchos `POST /ratings` en paralelo sobre el mismo objetivo con varios usuarios del seed (p. ej. `xargs -P 20`). Después compara `ratings_count, ratings_sum, avg_rating` del objetivo con `SELECT count(*), sum(score), round(avg(score), 2) FROM ratings WHERE ...`: deben coincidir.
+
+---
+
+## 8. Fase 5: Multi-réplica en Kubernetes (kind)
+
+El backend pasa de una sola instancia (`go run . server`) a **4 réplicas** en un cluster local de Kubernetes ([kind](https://kind.sigs.k8s.io/)), detrás de un balanceador. Hay tres objetivos:
+
+1. **Repartir la cuota de FreqBlog:** cada réplica usa su propia `FREQBLOG_API_KEY`.
+2. **Alta disponibilidad:** si cae un pod, las otras réplicas siguen atendiendo y Kubernetes lo recrea.
+3. **Aprender Kubernetes** con un despliegue realista.
+
+Postgres y Mailpit **no** entran al cluster: siguen en `db/docker-compose.yml`, conservan el volumen con el catálogo ya cargado y se comportan como lo haría una base gestionada en la nube.
+
+### 8.1 Arquitectura y Diagrama de Contenedores
+
+```mermaid
+flowchart LR
+    user["Navegador / curl"] -->|"http://localhost:80"| np
+
+    subgraph kind["Cluster kind 'junkbox' (1 control-plane + 2 workers)"]
+        np["NodePort 30080<br/>(extraPortMappings)"] --> envoy
+
+        subgraph egs["namespace envoy-gateway-system"]
+            eg["envoy-gateway<br/>(controller)"]
+            envoy["Envoy proxy<br/>Gateway 'junkbox' :80"]
+        end
+
+        subgraph ns["namespace junkbox"]
+            route["HTTPRoute 'backend'"]
+            svc["Service 'backend' :8080<br/>selector app=backend"]
+            b1["Pod backend-1<br/>Secret freqblog-1"]
+            b2["Pod backend-2<br/>Secret freqblog-2"]
+            b3["Pod backend-3<br/>Secret freqblog-3"]
+            b4["Pod backend-4<br/>Secret freqblog-4"]
+            cfg[("ConfigMap junkbox-config<br/>Secret junkbox-common")]
+            job["Job migrate<br/>(goose up)"]
+        end
+    end
+
+    subgraph compose["docker compose (red Docker 'kind')"]
+        pg[("postgres-junkbox<br/>pgvector · :5432")]
+        mp["mailpit-junkbox<br/>SMTP :1025 · UI :8025"]
+    end
+
+    ext["APIs externas<br/>Spotify · FreqBlog"]
+
+    eg -. "programa" .-> envoy
+    route -. "regla de ruteo" .-> envoy
+    svc -. "endpoints" .-> envoy
+    envoy -->|"reparte entre los 4 pods"| b1 & b2 & b3 & b4
+    cfg -. "envFrom" .-> b1 & b2 & b3 & b4
+    job -->|"migraciones (una vez)"| pg
+    b1 & b2 & b3 & b4 -->|"SQL · claims con SKIP LOCKED"| pg
+    b1 & b2 & b3 & b4 -->|"SMTP (outbox)"| mp
+    b1 & b2 & b3 & b4 -->|"HTTPS"| ext
+    user -.->|"http://localhost:8025"| mp
+```
+
+Así viaja una petición:
+
+1. `curl http://localhost/api/v1/...` llega al puerto 80 del host, que kind redirige al NodePort 30080 del nodo control-plane.
+2. Ese NodePort pertenece al Service del **Envoy proxy** que Envoy Gateway creó para el Gateway `junkbox`.
+3. Envoy aplica la `HTTPRoute` `backend`. Toma del Service `backend` la lista de pods listos (los que pasan la `readinessProbe`) y envía la petición a uno de ellos. Envoy no pasa por la IP del Service: balancea él mismo entre los pods.
+4. El pod responde con el header `X-Instance: <nombre del pod>`, que permite ver qué réplica atendió.
+5. Para llegar a Postgres y Mailpit, los pods resuelven `postgres-junkbox` y `mailpit-junkbox` por el DNS de Docker. Funciona porque esos contenedores están en la misma red `kind` que los nodos (ver [8.5](#85-postgres-y-mailpit-fuera-del-cluster)).
+
+### 8.2 Qué Ya Soportaba Varias Réplicas
+
+Gran parte del backend ya era *stateless* y no se tuvo que tocar:
+
+| Pieza | Por qué funciona con N réplicas |
+|---|---|
+| Access tokens JWT | Se validan solo con `JWT_SECRET`. **Requisito:** el mismo valor en todas las réplicas, por eso va en el Secret común. Con secretos distintos, un login hecho en `backend-1` fallaría cuando responde `backend-2`. |
+| Refresh tokens y denylist | Viven en Postgres, compartido por todas. |
+| Outbox de correo | `ClaimDueEmails` usa `FOR UPDATE SKIP LOCKED`, así que cada correo lo envía una sola réplica. |
+| Purgas horarias | Son `DELETE` idempotentes: que corran 4 veces no cambia el resultado. |
+| Configuración | `config.Load` tolera que no exista el `.env` y el entorno tiene prioridad. En el pod, todo llega por `envFrom`. |
+| Probes | `GET /healthz` ya existía. |
+| Shutdown | El servidor ya atiende `SIGTERM`, que es lo que Kubernetes envía al borrar un pod: cierra el HTTP (10 s) y el worker envía su último lote (10 s). `terminationGracePeriodSeconds: 30` deja margen. |
+| Pool de conexiones | 4 réplicas × `MaxOpenConns 10` = 40 conexiones, por debajo de las 100 que Postgres permite por defecto. |
+
+El único cambio en la API es el header `X-Instance`, que el router añade cuando `RouterOptions.Instance` no está vacío. `cmd/server.go` lo llena con `os.Hostname()`, que en Kubernetes es el nombre del pod.
+
+### 8.3 Worker de Embeddings con Varias Réplicas: Claim con Lease
+
+**Problema:** el rescan (al arrancar y cada minuto) leía los pendientes con un `SELECT` sin bloqueo. Con 4 réplicas, las 4 tomaban **los mismos** tracks y los pedían a FreqBlog 4 veces, así que gastaban la cuota que justamente se quería repartir.
+
+**Solución:** `ListPendingEmbeddingTracks` se reemplazó por `ClaimPendingEmbeddingTracks` (ver [4.3](#43-consultas-sql-para-sqlc-dbqueriescatalogsql)):
+
+- La subconsulta elige hasta N pendientes vencidos con `FOR UPDATE SKIP LOCKED`. Si otra réplica está reservando una fila en ese instante, se salta sin esperar.
+- El `UPDATE` adelanta `next_embedding_attempt_at` `LeaseDuration` (5 min). Mientras dura el lease, ningún otro rescan considera esas filas vencidas.
+- Al terminar no hay que liberar nada:
+  - **éxito:** `UpdateSongAudioFeaturesAndEmbedding` deja `pending_embedding = FALSE` y `next_embedding_attempt_at = NULL`;
+  - **sin resultado:** `MarkEmbeddingAttemptFailed` reprograma el reintento con backoff;
+  - **la réplica muere:** el lease vence y otra la retoma.
+- `rescan` no reserva nada mientras el proveedor está en pausa (`429`) o si el búfer ya tiene `BatchSize · 10` canciones. En esos casos el lease podría vencer antes de enviarlas y otra réplica las tomaría también.
+
+Las canciones que llegan por la **cola en memoria** (importadas por una búsqueda) se reparten solas: las procesa la réplica que atendió la búsqueda.
+
+**Limitación conocida:** una canción recién importada aún no tiene lease. Si en los ~2 s hasta que su réplica envía el lote, el rescan de otra réplica pasa justo por ella, se consultaría dos veces. El costo es una consulta extra ocasional, y la escritura es idempotente (`WHERE pending_embedding = TRUE`).
+
+### 8.4 Imágenes: `Dockerfile` y `.dockerignore`
+
+`Dockerfile` multi-stage con dos targets que comparten la etapa de build:
+
+| Target | Imagen | Contenido |
+|---|---|---|
+| `server` | `junkbox-backend:dev` | Binario estático (`CGO_ENABLED=0`) sobre `distroless/static:nonroot`. `ENTRYPOINT ["/junkbox-backend", "server"]`. |
+| `migrate` | `junkbox-migrate:dev` | goose `v3.29.0` + `db/migrations`. Lee `GOOSE_DRIVER`, `GOOSE_MIGRATION_DIR` y `GOOSE_DBSTRING` del entorno, así que no necesita shell. |
+
+Las imágenes *distroless* no tienen shell ni gestor de paquetes. Son chicas y casi no tienen superficie de ataque, y corren como usuario no-root (`runAsNonRoot: true` en los manifiestos).
+
+`.dockerignore` deja fuera del contexto de build el dataset (~175 MB), `data/`, los `.env`, `deploy/` (y con él los secretos) y `.git`.
+
+Como kind no descarga imágenes de un registro local, `make k8s-images` las construye y las copia a los nodos con `kind load docker-image`. Por eso los manifiestos usan la etiqueta `:dev` con `imagePullPolicy: IfNotPresent`. Con `:latest`, Kubernetes intentaría descargarla siempre.
+
+### 8.5 Postgres y Mailpit Fuera del Cluster
+
+`kind create cluster` crea la red Docker `kind`, donde corren los nodos (cada nodo es un contenedor). `deploy/compose.kind.yml` es un override de `db/docker-compose.yml` que une `postgres` y `mailpit` a esa red (declarada como `external`), además de su red por defecto:
+
+```bash
+docker compose -f db/docker-compose.yml -f deploy/compose.kind.yml --env-file .env up -d --wait
+```
+
+Con eso, el DNS interno de Docker resuelve `postgres-junkbox` y `mailpit-junkbox` desde los nodos. CoreDNS del cluster reenvía al resolver del nodo, así que los pods usan esos nombres directamente: `DATABASE_URL=…@postgres-junkbox:5432/…` y `SMTP_HOST=mailpit-junkbox`.
+
+- Los puertos publicados en el host no cambian: `goose`, `make db-shell` y la bandeja `http://localhost:8025` siguen funcionando. Mailpit sigue publicado solo en `127.0.0.1`.
+- `docker compose` recrea los contenedores al cambiar sus redes, pero el volumen `postgres-junkbox-data` se conserva.
+- Un `make db-up` posterior (sin el override) los saca de la red `kind`. Para volver a unirlos, `make k8s-deps`.
+
+### 8.6 Manifiestos (`deploy/k8s/`)
+
+```
+deploy/k8s/
+├── kind-config.yaml          # 1 control-plane + 2 workers; NodePort 30080 → localhost:80
+├── kustomization.yaml        # raíz: kubectl apply -k deploy/k8s aplica todo
+├── gatewayclass.yaml         # GatewayClass "envoy" (cluster-scoped, fuera de base/)
+├── base/                     # namespace junkbox, compartido por las 4 réplicas
+│   ├── namespace.yaml
+│   ├── configmap.yaml        # configuración no sensible (TTLs, CORS, SMTP_HOST…)
+│   ├── service.yaml          # ClusterIP "backend", selector app=backend
+│   └── gateway.yaml          # EnvoyProxy (NodePort) + Gateway + HTTPRoute
+├── backend/                  # plantilla de una réplica (Deployment replicas: 1)
+├── overlays/backend-{1..4}/  # nameSuffix -N, label replica=N y Secret freqblog-N
+├── migrate/                  # Job "migrate" (goose up)
+└── secrets/                  # *.env.template (los *.env reales los ignora git)
+```
+
+**Las 4 réplicas.** No es un solo Deployment con `replicas: 4`, porque cada pod necesita una clave de FreqBlog distinta y los pods de un mismo Deployment son idénticos. Se usan **4 Deployments de 1 réplica** generados con Kustomize: `backend/` es la plantilla y cada overlay le cambia el nombre (`nameSuffix`), le añade la label `replica: "N"` al selector (para que los Deployments no se disputen los pods) y, con un patch JSON, cambia el `secretRef` `freqblog` por `freqblog-N`. Los cuatro comparten la label `app: backend`, que es la que selecciona el Service.
+
+**Entrada HTTP con Gateway API.** Se usa [Envoy Gateway](https://gateway.envoyproxy.io/) `v1.9.3` en lugar de un Ingress: ingress-nginx quedó sin mantenimiento en marzo de 2026 y Gateway API es su reemplazo estándar. Sus recursos son:
+
+- **GatewayClass `envoy`:** indica qué controller implementa los Gateways. Su `parametersRef` apunta al EnvoyProxy `kind-nodeport`.
+- **EnvoyProxy `kind-nodeport`:** en kind no hay balanceadores de nube, así que el Service del proxy se crea como `NodePort` con el puerto fijo `30080`, que `kind-config.yaml` publica en `127.0.0.1:80`.
+- **Gateway `junkbox`:** un listener HTTP en el puerto 80.
+- **HTTPRoute `backend`:** envía todo (`/`) al Service `backend:8080`.
+
+Hay dos detalles de kind a tener en cuenta:
+
+- El Service del Envoy usa `externalTrafficPolicy: Cluster`. Con `Local`, que es el default, el NodePort solo responde en el nodo donde corre el pod de Envoy (un worker), pero kind publica el puerto del control-plane, así que las peticiones quedaban colgadas.
+- `kubectl get gateway` muestra `PROGRAMMED False` (`AddressNotAssigned`). Es esperable: sin LoadBalancer el Gateway no recibe una dirección, pero el tráfico por el NodePort funciona.
+
+**Probes.**
+- `readinessProbe` en `/healthz` cada 5 s: mientras falla, el pod no recibe tráfico (por ejemplo, durante el arranque o el shutdown).
+- `livenessProbe` en `/healthz` cada 10 s: si el proceso se cuelga, Kubernetes lo reinicia.
+
+**Migraciones.** El Job `migrate` corre `goose up` una sola vez, con `GOOSE_DBSTRING` tomado de la clave `DATABASE_URL` del Secret común. Un Job es inmutable y no se vuelve a ejecutar solo, así que `make k8s-migrate` lo borra y lo vuelve a crear. goose es idempotente: si no hay migraciones nuevas, no hace nada.
+
+### 8.7 Secretos
+
+Los valores sensibles no van en git ni en el ConfigMap:
+
+| Secret | Origen | Claves |
+|---|---|---|
+| `junkbox-common` | `deploy/k8s/secrets/common.env` | `DATABASE_URL`, `JWT_SECRET`, `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `SMTP_USERNAME`, `SMTP_PASSWORD` |
+| `freqblog-1` … `freqblog-4` | `deploy/k8s/secrets/freqblog-N.env` | `FREQBLOG_API_KEY` |
+
+**De dónde sale cada variable del `.env`.** En el cluster, la configuración se reparte en tres fuentes, y cada pod recibe las tres juntas por `envFrom`:
+
+| Variable del `.env` | En Kubernetes |
+|---|---|
+| `DATABASE_URL` | Secret `junkbox-common`, con host `postgres-junkbox:5432` (el contenedor en la red `kind`) |
+| `JWT_SECRET`, `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `SMTP_USERNAME`, `SMTP_PASSWORD` | Secret `junkbox-common` |
+| `FREQBLOG_API_KEY` | Secret `freqblog-N`, uno por réplica |
+| `HTTP_ADDR`, `ACCESS_TOKEN_TTL`, `REFRESH_TOKEN_TTL`, `SEARCH_FALLBACK_THRESHOLD`, `CORS_ALLOWED_ORIGINS`, `FRONTEND_URL`, `PASSWORD_RESET_TTL`, `EMAIL_VERIFICATION_TTL`, `MAIL_DRIVER`, `MAIL_FROM`, `SMTP_PORT`, `SMTP_TLS` | ConfigMap `junkbox-config` (`deploy/k8s/base/configmap.yaml`) |
+| `SMTP_HOST` | ConfigMap, con el valor `mailpit-junkbox`: dentro de un pod, `localhost` es el propio pod |
+| `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_PORT` | No pasan al cluster. Solo los usan el contenedor de Postgres y el Makefile, así que siguen en el `.env`. El backend solo lee `DATABASE_URL`, que ya incluye usuario, contraseña y base. |
+
+El `.env` y el ConfigMap son **independientes**. Un cambio en el `.env` solo afecta a `make run-server`. Para el cluster:
+
+- si el cambio es no sensible, edita `configmap.yaml` y aplícalo con `make k8s-apply && make k8s-redeploy`;
+- si es un secreto, edita `deploy/k8s/secrets/*.env` y aplícalo con `make k8s-secrets && make k8s-redeploy`.
+
+Los pods leen las variables solo al arrancar; por eso hace falta el redeploy.
+
+`make k8s-secrets` los crea o actualiza con `kubectl create secret generic … --from-env-file=… --dry-run=client -o yaml | kubectl apply -f -`. Los valores van **sin comillas**, porque `--from-env-file` las tomaría como parte del valor. Tras cambiar un Secret, las réplicas lo leen al reiniciarse (`make k8s-redeploy`).
+
+### 8.8 Automatización con `Makefile`
+
+Todos los targets usan `kubectl --context kind-junkbox`, para no aplicar nada por error en otro cluster.
+
+| Target | Qué hace |
+|---|---|
+| `k8s-up` | Todo en orden: `k8s-cluster` → `k8s-deps` → `k8s-images` → `k8s-base` → `k8s-secrets` → `k8s-migrate` → `k8s-apply`. |
+| `k8s-cluster` | Crea el cluster si no existe e instala Envoy Gateway (incluye los CRDs de Gateway API). |
+| `k8s-deps` | Postgres y Mailpit con el override de la red `kind`. |
+| `k8s-images` | Construye `junkbox-backend:dev` y `junkbox-migrate:dev` y los carga en kind. |
+| `k8s-base` | GatewayClass, namespace, ConfigMap, Service y Gateway. |
+| `k8s-secrets` | Crea o actualiza los Secrets desde `deploy/k8s/secrets/*.env`. |
+| `k8s-migrate` | Vuelve a crear el Job `migrate`, espera a que termine y muestra el log. |
+| `k8s-apply` | `kubectl apply -k deploy/k8s` y espera a que los 4 Deployments estén listos. |
+| `k8s-redeploy` | Tras cambiar el código: reconstruye, recarga y reinicia las réplicas **de a una** (rolling restart, sin cortar el servicio). |
+| `k8s-status` / `k8s-logs` | Estado de los recursos y logs de las 4 réplicas, con prefijo por pod. |
+| `k8s-down` | Borra el cluster. Postgres, Mailpit y el volumen del catálogo no se tocan. |
+
+El orden importa: las réplicas arrancan cuando el esquema ya está migrado, y los Secrets existen antes de que los pods los necesiten. Si se aplica todo de golpe con `kubectl apply -k deploy/k8s`, los pods que arrancan antes de tener el Secret quedan en `CreateContainerConfigError` y se recuperan solos cuando aparece.
+
+### 8.9 Decisiones
+
+| Tema | Elegido | Alternativas consideradas |
+|---|---|---|
+| Duplicados del rescan | Claim con lease (`SKIP LOCKED`) | Elegir un líder con advisory lock (el backlog se procesaría con una sola clave); aceptar duplicados (gastaría hasta 4 veces la cuota) |
+| Clave por réplica | 4 Deployments con Kustomize | StatefulSet con índice de pod (más idiomático, pero necesita entrypoint con shell o un cambio en la app) |
+| Migraciones | Job one-shot | Correrlas al arrancar el backend (acopla el arranque al esquema); manual (sin orden garantizado) |
+| Cluster local | kind | Kubernetes de Docker Desktop (un solo nodo); minikube (más pesado) |
+| Entrada HTTP | Gateway API + Envoy Gateway | ingress-nginx (retirado en 2026); Traefik |
+| Postgres y Mailpit | Fuera del cluster (compose) | Dentro del cluster (habría que reingestar el catálogo en un volumen nuevo) |
+| Red hacia compose | Unir los contenedores a la red `kind` | `host.docker.internal` (obligaría a publicar Mailpit en `0.0.0.0`) |
+
+### 8.10 Verificación
+
+```bash
+make k8s-up
+make k8s-status        # 4 pods backend-N Running/Ready, repartidos en los 2 workers; job migrate Complete
+
+# Balanceo: X-Instance muestra los 4 pods
+for i in $(seq 20); do curl -si http://localhost/healthz | grep -i x-instance; done | sort | uniq -c
+
+# Sesión compartida: el token emitido por una réplica vale en las demás
+ACCESS_TOKEN=$(curl -s -X POST http://localhost/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"identifier":"cesar@junkbox.local","password":"Password123!"}' | jq -r .access_token)
+for i in $(seq 8); do curl -s -o /dev/null -w "%{http_code} " -H "Authorization: Bearer $ACCESS_TOKEN" http://localhost/api/v1/auth/me; done
+
+# Alta disponibilidad: borrar un pod no corta el servicio y Kubernetes lo recrea
+kubectl --context kind-junkbox -n junkbox delete pod -l replica=2
+for i in $(seq 10); do curl -s -o /dev/null -w "%{http_code} " http://localhost/healthz; done
+```
+
+Qué debe pasar:
+
+- **Correo:** al pedir `POST /api/v1/auth/password/forgot`, llega **un** solo correo a Mailpit (`http://localhost:8025`).
+- **Embeddings:** tras una búsqueda que importa canciones desde Spotify (`source: spotify_fallback`), en Postgres `pending_embedding` pasa a `FALSE` en pocos segundos. Mientras una réplica tiene reservado un pendiente, su `next_embedding_attempt_at` queda unos 5 min en el futuro, así que las demás no lo toman. El test `TestRescanReservaConLeaseYNoReservaEnPausa` cubre la reserva.

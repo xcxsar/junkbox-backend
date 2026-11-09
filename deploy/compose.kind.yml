@@ -1,0 +1,16 @@
+# Override de db/docker-compose.yml: une Postgres y Mailpit a la red Docker
+# "kind" (la crea `kind create cluster`) para que los pods del cluster los
+# alcancen por nombre: postgres-junkbox:5432 y mailpit-junkbox:1025.
+#
+#   docker compose -f db/docker-compose.yml -f deploy/compose.kind.yml --env-file .env up -d --wait
+#
+# Los puertos publicados en el host no cambian.
+services:
+  postgres:
+    networks: [default, kind]
+  mailpit:
+    networks: [default, kind]
+
+networks:
+  kind:
+    external: true

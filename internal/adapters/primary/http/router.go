@@ -28,6 +28,9 @@ type RouterOptions struct {
 	// AllowedOrigins son los orígenes del frontend admitidos por CORS. Si
 	// está vacía, se rechaza cualquier origen.
 	AllowedOrigins []string
+	// Instance identifica la réplica (el nombre del pod) en el header
+	// X-Instance de cada respuesta. Si está vacío, no se envía.
+	Instance string
 }
 
 // NewRouter construye el árbol de rutas Chi.
@@ -37,6 +40,9 @@ func NewRouter(opts RouterOptions) http.Handler {
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 	r.Use(corsHandler(opts.AllowedOrigins))
+	if opts.Instance != "" {
+		r.Use(middleware.SetHeader("X-Instance", opts.Instance))
+	}
 
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)

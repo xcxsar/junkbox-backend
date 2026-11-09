@@ -90,6 +90,27 @@ choco install make
 
 ---
 
+### 5. kind y kubectl (solo para el despliegue en Kubernetes)
+
+[kind](https://kind.sigs.k8s.io/) levanta un cluster de Kubernetes local con contenedores Docker. `kubectl` es el cliente de Kubernetes e incluye Kustomize.
+
+```bash
+# macOS
+brew install kind kubectl
+
+# Linux / Windows: ver https://kind.sigs.k8s.io/docs/user/quick-start/#installation
+#                  y https://kubernetes.io/docs/tasks/tools/
+```
+
+Verificar instalación:
+
+```bash
+kind version
+kubectl version --client
+```
+
+---
+
 ## Configuración del Entorno de Base de Datos
 
 1. Copia la plantilla de variables de entorno ubicada en `.env.template` hacia `.env`:
@@ -277,6 +298,8 @@ make seed-up                  # 4 usuarios del equipo, contraseña Password123!
 make run-server
 ```
 
+Para levantar las 4 réplicas en Kubernetes, ver [Despliegue en Kubernetes (kind)](#despliegue-en-kubernetes-kind).
+
 ### Correos en producción (Resend)
 
 En desarrollo los correos llegan a Mailpit (http://localhost:8025). Para enviarlos de verdad con [Resend](https://resend.com):
@@ -289,9 +312,102 @@ Los correos se guardan en la tabla `email_outbox` dentro de la misma transacció
 
 ---
 
+## Despliegue en Kubernetes (kind)
+
+Levanta **4 réplicas** del backend en un cluster local de [kind](https://kind.sigs.k8s.io/), detrás de [Envoy Gateway](https://gateway.envoyproxy.io/) (Gateway API). Cada réplica usa su propia `FREQBLOG_API_KEY`, y todas comparten el `JWT_SECRET` y la base de datos. Postgres y Mailpit siguen en docker compose, unidos a la red Docker `kind`. El detalle técnico y las decisiones están en `implementacion.md`, sección 8.
+
+```mermaid
+flowchart LR
+    user["Navegador / curl"] -->|"http://localhost:80"| envoy
+
+    subgraph kind["Cluster kind 'junkbox'"]
+        envoy["Envoy Gateway<br/>Gateway + HTTPRoute"] --> svc["Service backend :8080"]
+        svc --> b1["backend-1<br/>freqblog-1"]
+        svc --> b2["backend-2<br/>freqblog-2"]
+        svc --> b3["backend-3<br/>freqblog-3"]
+        svc --> b4["backend-4<br/>freqblog-4"]
+        job["Job migrate<br/>(goose up)"]
+    end
+
+    subgraph compose["docker compose (red Docker 'kind')"]
+        pg[("postgres-junkbox<br/>pgvector")]
+        mp["mailpit-junkbox<br/>SMTP / UI :8025"]
+    end
+
+    job --> pg
+    b1 & b2 & b3 & b4 -->|"SQL"| pg
+    b1 & b2 & b3 & b4 -->|"SMTP"| mp
+    b1 & b2 & b3 & b4 -->|"HTTPS"| ext["Spotify · FreqBlog"]
+```
+
+- **Envoy Gateway** recibe todo el tráfico HTTP en `localhost:80` y lo reparte entre los pods listos del Service `backend`. Cada respuesta trae el header `X-Instance` con el nombre del pod que atendió.
+- **backend-1…4** son cuatro Deployments con la misma imagen. Solo cambia el Secret con la clave de FreqBlog.
+- **El Job `migrate`** aplica las migraciones una sola vez antes de que arranquen las réplicas.
+- **Coordinación entre réplicas:** los workers usan Postgres (`FOR UPDATE SKIP LOCKED`), así que ningún correo se envía dos veces y las réplicas no piden los mismos tracks a FreqBlog.
+
+### 1. Configurar los secretos
+
+```bash
+cp deploy/k8s/secrets/common.env.template deploy/k8s/secrets/common.env
+for n in 1 2 3 4; do cp deploy/k8s/secrets/freqblog.env.template deploy/k8s/secrets/freqblog-$n.env; done
+```
+
+Completar los archivos **sin comillas**:
+
+- `common.env`: `JWT_SECRET` (`openssl rand -hex 32`), la contraseña de Postgres en `DATABASE_URL` y las credenciales de Spotify.
+- `freqblog-N.env`: una `FREQBLOG_API_KEY` distinta en cada uno.
+
+Git ignora estos archivos. La configuración no sensible (TTLs, CORS, Mailpit) está en `deploy/k8s/base/configmap.yaml`. Por eso `common.env` tiene menos campos que el `.env`:
+
+- **Las variables `POSTGRES_*`** no pasan al cluster. Solo las usa el contenedor de Postgres; el backend se conecta con `DATABASE_URL`.
+- **`SMTP_HOST`** cambia a `mailpit-junkbox`, porque dentro de un pod `localhost` es el propio pod.
+
+La tabla completa con el destino de cada variable está en `implementacion.md`, sección 8.7.
+
+> El `.env` y el ConfigMap son independientes: editar el `.env` no cambia el cluster. Tras editar `configmap.yaml`, ejecuta `make k8s-apply && make k8s-redeploy`. Tras editar un secreto, ejecuta `make k8s-secrets && make k8s-redeploy`.
+
+### 2. Levantar todo
+
+```bash
+make k8s-up
+```
+
+Este comando:
+
+1. Crea el cluster `junkbox` (1 control-plane + 2 workers) e instala Envoy Gateway.
+2. Une Postgres y Mailpit a la red `kind` (el volumen del catálogo se conserva).
+3. Construye y carga las imágenes `junkbox-backend:dev` y `junkbox-migrate:dev`.
+4. Crea los Secrets, corre las migraciones y despliega las 4 réplicas.
+
+La API queda en `http://localhost/api/v1` (puerto 80) y Mailpit en `http://localhost:8025`. Si es una base nueva, cargar el catálogo y los usuarios como siempre (`make ingest-songs`, `make seed-up`).
+
+### 3. Operación
+
+| Comando | Descripción |
+|---|---|
+| `make k8s-status` | Pods, Services, Gateway, HTTPRoute y Job. |
+| `make k8s-logs` | Logs de las 4 réplicas, con prefijo por pod. |
+| `make k8s-redeploy` | Tras cambiar el código: reconstruye y reinicia las réplicas de a una, sin cortar el servicio. |
+| `make k8s-secrets` | Vuelve a cargar los Secrets (aplicar luego con `make k8s-redeploy`). |
+| `make k8s-migrate` | Vuelve a correr `goose up` con el Job `migrate`. |
+| `make k8s-down` | Borra el cluster. Postgres, Mailpit y el volumen del catálogo no se tocan. |
+
+Para ver el balanceo y la recuperación ante fallos:
+
+```bash
+for i in $(seq 20); do curl -si http://localhost/healthz | grep -i x-instance; done | sort | uniq -c
+kubectl --context kind-junkbox -n junkbox delete pod -l replica=2   # Kubernetes lo recrea solo
+```
+
+> **Nota:** `make k8s-status` muestra el Gateway con `PROGRAMMED False`. Es normal en kind (no hay LoadBalancer que le asigne una dirección): el tráfico entra por el NodePort publicado en `localhost:80`.
+>
+> `make k8s-deps` recrea los contenedores de Postgres y Mailpit para unirlos a la red `kind`. Un `make db-up` posterior los saca de esa red. Para volver a unirlos, ejecuta `make k8s-deps` otra vez.
+
+---
+
 ## API REST
 
-Base URL: `http://localhost:8080/api/v1`
+Base URL: `http://localhost:8080/api/v1` (con `make run-server`) o `http://localhost/api/v1` (en Kubernetes)
 
 El backend utiliza tokens de acceso **JWT HS256** (15 minutos de vigencia) con claims `sub`, `username`, `jti`, `iat`, `exp`, y **Refresh Tokens** opacos (7 días de vigencia) con hash SHA-256 en base de datos, rotación por familias y denylist de revocación inmediata.
 

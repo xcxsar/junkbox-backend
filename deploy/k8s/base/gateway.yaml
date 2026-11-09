@@ -1,0 +1,46 @@
+# Entrada HTTP con Gateway API + Envoy Gateway. En kind no hay LoadBalancer:
+# el Service del Envoy se expone como NodePort 30080, que kind-config.yaml
+# publica en http://localhost:80.
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: kind-nodeport
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyService:
+        type: NodePort
+        # Con Local (el default) el NodePort solo responde en el nodo donde
+        # corre el pod de Envoy; kind publica el puerto del control-plane.
+        externalTrafficPolicy: Cluster
+        patch:
+          type: StrategicMerge
+          value:
+            spec:
+              ports:
+                - port: 80
+                  nodePort: 30080
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: junkbox
+spec:
+  gatewayClassName: envoy
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: backend
+spec:
+  parentRefs:
+    - name: junkbox
+  rules:
+    - backendRefs:
+        - name: backend
+          port: 8080

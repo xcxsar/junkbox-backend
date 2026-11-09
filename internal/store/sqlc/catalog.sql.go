@@ -53,6 +53,63 @@ func (q *Queries) ClaimArtistByName(ctx context.Context, arg ClaimArtistByNamePa
 	return id, err
 }
 
+const claimPendingEmbeddingTracks = `-- name: ClaimPendingEmbeddingTracks :many
+
+UPDATE song_metadata s
+SET next_embedding_attempt_at = NOW() + make_interval(secs => $1::float8)
+WHERE s.id IN (
+    SELECT p.id
+    FROM song_metadata p
+    WHERE p.pending_embedding = TRUE
+      AND p.embedding_attempts < $2::int
+      AND (p.next_embedding_attempt_at IS NULL OR p.next_embedding_attempt_at <= NOW())
+    ORDER BY p.next_embedding_attempt_at NULLS FIRST, p.id
+    LIMIT $3
+    FOR UPDATE SKIP LOCKED
+)
+RETURNING s.track_id, s.isrc, s.embedding_attempts
+`
+
+type ClaimPendingEmbeddingTracksParams struct {
+	LeaseSeconds float64 `json:"lease_seconds"`
+	MaxAttempts  int32   `json:"max_attempts"`
+	MaxResults   int32   `json:"max_results"`
+}
+
+type ClaimPendingEmbeddingTracksRow struct {
+	TrackID           sql.NullString `json:"track_id"`
+	Isrc              sql.NullString `json:"isrc"`
+	EmbeddingAttempts int32          `json:"embedding_attempts"`
+}
+
+// --- Worker de embeddings ---
+// ClaimPendingEmbeddingTracks reserva los pendientes vencidos con un lease:
+// adelanta next_embedding_attempt_at para que las demás réplicas no los
+// tomen (SKIP LOCKED evita esperar a las que los están reservando). Si la
+// réplica muere, otra los recoge cuando vence el lease.
+func (q *Queries) ClaimPendingEmbeddingTracks(ctx context.Context, arg ClaimPendingEmbeddingTracksParams) ([]ClaimPendingEmbeddingTracksRow, error) {
+	rows, err := q.db.QueryContext(ctx, claimPendingEmbeddingTracks, arg.LeaseSeconds, arg.MaxAttempts, arg.MaxResults)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ClaimPendingEmbeddingTracksRow
+	for rows.Next() {
+		var i ClaimPendingEmbeddingTracksRow
+		if err := rows.Scan(&i.TrackID, &i.Isrc, &i.EmbeddingAttempts); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getAlbum = `-- name: GetAlbum :one
 SELECT
     id, spotify_id, title, artist_id, artist_name, release_year, album_type,
@@ -294,52 +351,6 @@ func (q *Queries) GetTrack(ctx context.Context, arg GetTrackParams) (GetTrackRow
 		&i.AvgRating,
 	)
 	return i, err
-}
-
-const listPendingEmbeddingTracks = `-- name: ListPendingEmbeddingTracks :many
-
-SELECT track_id, isrc, embedding_attempts
-FROM song_metadata
-WHERE pending_embedding = TRUE
-  AND embedding_attempts < $1::int
-  AND (next_embedding_attempt_at IS NULL OR next_embedding_attempt_at <= NOW())
-ORDER BY next_embedding_attempt_at NULLS FIRST, id
-LIMIT $2
-`
-
-type ListPendingEmbeddingTracksParams struct {
-	MaxAttempts int32 `json:"max_attempts"`
-	MaxResults  int32 `json:"max_results"`
-}
-
-type ListPendingEmbeddingTracksRow struct {
-	TrackID           sql.NullString `json:"track_id"`
-	Isrc              sql.NullString `json:"isrc"`
-	EmbeddingAttempts int32          `json:"embedding_attempts"`
-}
-
-// --- Worker de embeddings ---
-func (q *Queries) ListPendingEmbeddingTracks(ctx context.Context, arg ListPendingEmbeddingTracksParams) ([]ListPendingEmbeddingTracksRow, error) {
-	rows, err := q.db.QueryContext(ctx, listPendingEmbeddingTracks, arg.MaxAttempts, arg.MaxResults)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ListPendingEmbeddingTracksRow
-	for rows.Next() {
-		var i ListPendingEmbeddingTracksRow
-		if err := rows.Scan(&i.TrackID, &i.Isrc, &i.EmbeddingAttempts); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
 }
 
 const listTracksByAlbum = `-- name: ListTracksByAlbum :many

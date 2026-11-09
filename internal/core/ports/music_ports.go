@@ -54,7 +54,7 @@ type RetryAfterError interface {
 
 // EmbeddingStore son las queries del worker de embeddings.
 type EmbeddingStore interface {
-	ListPendingEmbeddingTracks(ctx context.Context, arg sqlc.ListPendingEmbeddingTracksParams) ([]sqlc.ListPendingEmbeddingTracksRow, error)
+	ClaimPendingEmbeddingTracks(ctx context.Context, arg sqlc.ClaimPendingEmbeddingTracksParams) ([]sqlc.ClaimPendingEmbeddingTracksRow, error)
 	UpdateSongAudioFeaturesAndEmbedding(ctx context.Context, arg sqlc.UpdateSongAudioFeaturesAndEmbeddingParams) (int64, error)
 	MarkEmbeddingAttemptFailed(ctx context.Context, arg sqlc.MarkEmbeddingAttemptFailedParams) error
 	GetCatalogFeatureMedians(ctx context.Context) (sqlc.GetCatalogFeatureMediansRow, error)

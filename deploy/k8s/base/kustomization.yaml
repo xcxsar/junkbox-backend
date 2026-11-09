@@ -1,0 +1,9 @@
+# Recursos compartidos por las 4 réplicas: namespace, configuración, Service y Gateway.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: junkbox
+resources:
+  - namespace.yaml
+  - configmap.yaml
+  - service.yaml
+  - gateway.yaml

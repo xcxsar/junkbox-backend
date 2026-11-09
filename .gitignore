@@ -8,3 +8,5 @@ go.work
 go.work.sum
 data
 .env
+# Secretos de Kubernetes (ver deploy/k8s/secrets/*.template)
+deploy/k8s/secrets/*.env

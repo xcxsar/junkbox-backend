@@ -1,0 +1,13 @@
+# Todo el despliegue: kubectl apply -k deploy/k8s
+# `make k8s-up` aplica las partes en orden (base → secretos → migraciones →
+# réplicas) para que los backends arranquen con el esquema ya migrado.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - gatewayclass.yaml
+  - base
+  - migrate
+  - overlays/backend-1
+  - overlays/backend-2
+  - overlays/backend-3
+  - overlays/backend-4

@@ -19,6 +19,12 @@ type Querier interface {
 	// ClaimDueEmails bloquea los pendientes vencidos; SKIP LOCKED evita que dos
 	// réplicas tomen el mismo correo.
 	ClaimDueEmails(ctx context.Context, limit int32) ([]ClaimDueEmailsRow, error)
+	// --- Worker de embeddings ---
+	// ClaimPendingEmbeddingTracks reserva los pendientes vencidos con un lease:
+	// adelanta next_embedding_attempt_at para que las demás réplicas no los
+	// tomen (SKIP LOCKED evita esperar a las que los están reservando). Si la
+	// réplica muere, otra los recoge cuando vence el lease.
+	ClaimPendingEmbeddingTracks(ctx context.Context, arg ClaimPendingEmbeddingTracksParams) ([]ClaimPendingEmbeddingTracksRow, error)
 	// ConsumeEmailToken marca el token como usado solo si sigue vigente; al ser
 	// un único UPDATE, dos peticiones concurrentes no pueden consumirlo dos veces.
 	ConsumeEmailToken(ctx context.Context, arg ConsumeEmailTokenParams) (uuid.UUID, error)
@@ -62,8 +68,6 @@ type Querier interface {
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
 	InvalidateEmailTokens(ctx context.Context, arg InvalidateEmailTokensParams) error
 	IsAccessTokenRevoked(ctx context.Context, jti uuid.UUID) (bool, error)
-	// --- Worker de embeddings ---
-	ListPendingEmbeddingTracks(ctx context.Context, arg ListPendingEmbeddingTracksParams) ([]ListPendingEmbeddingTracksRow, error)
 	ListReviewsByTarget(ctx context.Context, arg ListReviewsByTargetParams) ([]ListReviewsByTargetRow, error)
 	ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]ListTracksByAlbumRow, error)
 	MarkEmailFailed(ctx context.Context, arg MarkEmailFailedParams) error
