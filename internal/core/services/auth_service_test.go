@@ -368,12 +368,28 @@ func TestRegisterCarreraUniqueViolation(t *testing.T) {
 	}
 }
 
+func TestRegisterEmailsValidos(t *testing.T) {
+	for _, email := range []string{"x@junkbox.local", "a@sub.dominio.mx", "a@xn--80ak6aa92e.xn--p1ai"} {
+		t.Run(email, func(t *testing.T) {
+			in := validRegister()
+			in.Email = email
+			if _, _, err := newEnv().svc.Register(context.Background(), in); err != nil {
+				t.Fatalf("Register(%q): %v", email, err)
+			}
+		})
+	}
+}
+
 func TestRegisterValidaciones(t *testing.T) {
 	cases := map[string]func(*RegisterInput){
 		"username corto":                  func(in *RegisterInput) { in.Username = "ab" },
 		"username con espacio":            func(in *RegisterInput) { in.Username = "mel omano" },
 		"email inválido":                  func(in *RegisterInput) { in.Email = "no-es-email" },
 		"email con nombre":                func(in *RegisterInput) { in.Email = "Mel <mel@x.mx>" },
+		"email sin punto en dominio":      func(in *RegisterInput) { in.Email = "agsdafsafsdfs@fdsafsadfas" },
+		"email TLD de 1 letra":            func(in *RegisterInput) { in.Email = "a@b.c" },
+		"email TLD numérico":              func(in *RegisterInput) { in.Email = "a@b.123" },
+		"email dominio IP":                func(in *RegisterInput) { in.Email = "a@[127.0.0.1]" },
 		"password corta":                  func(in *RegisterInput) { in.Password = "Ab1!" },
 		"password > 72 bytes":             func(in *RegisterInput) { in.Password = "Aa1!" + strings.Repeat("a", 69) },
 		"password sin números":            func(in *RegisterInput) { in.Password = "Password!!" },

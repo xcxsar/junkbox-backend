@@ -68,3 +68,56 @@ La validación de términos se hace antes que las demás, así que si la casilla
 
 - `go test ./...`: `TestRegisterSinAceptarTerminos`, versión guardada en `TestRegisterOK`, `TestRegisterExigeTerminos` (handler) y `TestTermsVersion` (config).
 - Prueba manual contra Postgres: `true` → `201` y dos filas (`terms`, `privacy`, `2026-11-12`); `false` y campo ausente → `400`. `migrate-down`/`migrate-up` aplican sin errores.
+
+---
+
+### AUTH-06 · El registro acepta correos con dominio sin punto
+
+- **Estado:** Resuelta · **Fecha:** 2026-11-12
+- **Responsable:** Backend
+
+#### Qué se pidió
+
+`validateRegister` (`internal/core/services/auth_service.go`) validaba el correo solo con `net/mail.ParseAddress`, que acepta `usuario@dominio` sin punto. Así se podían crear cuentas con correos inexistentes (p. ej. `agsdafsafsdfs@fdsafsadfas`). Se pidió exigir que el dominio tenga al menos un punto y un TLD de 2 o más letras, y responder `400 {"error": "email inválido"}` si no, o confirmar por escrito que se seguirían aceptando.
+
+#### Decisión
+
+Se implementó en el backend: ya no se aceptan estos correos. La validación del frontend (`EMAIL_PATTERN`) no basta porque la API se puede llamar directamente.
+
+Regla nueva (además de `ParseAddress` y el máximo de 255 caracteres):
+
+- El dominio debe tener al menos un punto.
+- El último segmento (TLD) debe tener 2 o más letras, o ser un TLD internacional en punycode (`xn--…`), para no rechazar dominios reales con caracteres no latinos.
+- Se rechazan los literales IP (`usuario@[127.0.0.1]`) y los TLD numéricos.
+
+#### Contrato de la API
+
+`POST /api/v1/auth/register`: si el correo no cumple la regla responde `400 {"error": "email inválido"}`, el mismo mensaje que ya existía para los correos mal formados.
+
+| Correo | Resultado |
+| --- | --- |
+| `agsdafsafsdfs@fdsafsadfas` | `400` (dominio sin punto) |
+| `a@b.c` | `400` (TLD de 1 letra) |
+| `a@b.123` | `400` (TLD numérico) |
+| `a@[127.0.0.1]` | `400` (literal IP) |
+| `x@junkbox.local` | aceptado |
+| `a@sub.dominio.mx` | aceptado |
+| `a@xn--80ak6aa92e.xn--p1ai` | aceptado (punycode) |
+
+#### Impacto en el frontend
+
+Ninguno funcional: `EMAIL_PATTERN` en `auth.validation.ts` ya exige `usuario@dominio.tld` y es coherente con la regla del backend. El cambio solo afecta al registro: login y recuperación de contraseña no validan el formato, así que una cuenta ya creada con un correo así podría seguir entrando.
+
+#### Pendiente / fuera de alcance
+
+- Cuentas existentes: en la base de datos local hay **0** cuentas que incumplan la regla. Para revisar otros entornos:
+  ```sql
+  SELECT id, username, email FROM users
+  WHERE email !~ '@[^@]+\.([a-z]{2,63}|xn--[a-z0-9-]+)$';
+  ```
+- No se comprueba que el dominio exista (registros MX). La verificación por correo sigue siendo la que confirma que el buzón es real.
+
+#### Verificación
+
+- `go test ./...`: casos nuevos en `TestRegisterValidaciones` (sin punto, TLD de 1 letra, TLD numérico, literal IP) y `TestRegisterEmailsValidos` (dominio `.local` del seed, subdominio y punycode).
+- Prueba manual contra el servidor local: `agsdafsafsdfs@fdsafsadfas` → `400 {"error":"email inválido"}`; `…@dominio.mx` → `201` (el usuario de prueba se borró).

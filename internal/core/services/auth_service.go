@@ -38,6 +38,10 @@ const (
 // usernamePattern: handle (@username) en minúsculas, 3 a 50 caracteres.
 var usernamePattern = regexp.MustCompile(`^[a-z0-9_.]{3,50}$`)
 
+// tldPattern: TLD final del dominio del correo, de 2 o más letras (o IDN
+// en punycode, p. ej. xn--p1ai). El email ya llega en minúsculas.
+var tldPattern = regexp.MustCompile(`^([a-z]{2,63}|xn--[a-z0-9-]{1,59})$`)
+
 // dummyHash es un hash bcrypt (coste 12) válido contra el que se compara la
 // contraseña cuando el usuario no existe, para que login tarde lo mismo en
 // ambos casos y no revele qué usuarios están registrados.
@@ -371,7 +375,7 @@ func validateRegister(in RegisterInput) error {
 	if len(in.Email) > maxEmailLen {
 		return domain.NewValidationError("email inválido")
 	}
-	if addr, err := mail.ParseAddress(in.Email); err != nil || addr.Address != in.Email {
+	if addr, err := mail.ParseAddress(in.Email); err != nil || addr.Address != in.Email || !validEmailDomain(in.Email) {
 		return domain.NewValidationError("email inválido")
 	}
 	if err := validatePassword(in.Password); err != nil {
@@ -418,6 +422,14 @@ func validatePassword(pw string) error {
 
 // isUniqueViolation detecta el SQLSTATE 23505 (unique_violation) sin
 // acoplar el núcleo al driver: *pgconn.PgError expone SQLState().
+// validEmailDomain exige un dominio con al menos un punto y un TLD válido
+// (tldPattern). net/mail acepta "usuario@dominio" y literales IP; aquí no.
+func validEmailDomain(email string) bool {
+	host := email[strings.LastIndex(email, "@")+1:]
+	dot := strings.LastIndex(host, ".")
+	return dot > 0 && tldPattern.MatchString(host[dot+1:])
+}
+
 func isUniqueViolation(err error) bool {
 	var pgErr interface{ SQLState() string }
 	return errors.As(err, &pgErr) && pgErr.SQLState() == "23505"
