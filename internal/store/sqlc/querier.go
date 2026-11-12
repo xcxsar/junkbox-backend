@@ -15,7 +15,11 @@ import (
 type Querier interface {
 	// ClaimArtistByName asigna el spotify_id a un artista del CSV homónimo
 	// (spotify_id NULL). No devuelve filas si no hay ninguno libre.
-	ClaimArtistByName(ctx context.Context, arg ClaimArtistByNameParams) (uuid.UUID, error)
+	ClaimArtistByName(ctx context.Context, arg ClaimArtistByNameParams) (ClaimArtistByNameRow, error)
+	// Los claims los usa solo el worker de respaldo: reservan con un lease los
+	// pendientes cuyo reintento ya venció, para que otra réplica no los consulte
+	// a la vez. La búsqueda síncrona no reserva (su presupuesto es corto).
+	ClaimArtistsForEnrichment(ctx context.Context, arg ClaimArtistsForEnrichmentParams) ([]sql.NullString, error)
 	// ClaimDueEmails bloquea los pendientes vencidos; SKIP LOCKED evita que dos
 	// réplicas tomen el mismo correo.
 	ClaimDueEmails(ctx context.Context, limit int32) ([]ClaimDueEmailsRow, error)
@@ -25,6 +29,7 @@ type Querier interface {
 	// tomen (SKIP LOCKED evita esperar a las que los están reservando). Si la
 	// réplica muere, otra los recoge cuando vence el lease.
 	ClaimPendingEmbeddingTracks(ctx context.Context, arg ClaimPendingEmbeddingTracksParams) ([]ClaimPendingEmbeddingTracksRow, error)
+	ClaimSongsForLinking(ctx context.Context, arg ClaimSongsForLinkingParams) ([]sql.NullString, error)
 	// ConsumeEmailToken marca el token como usado solo si sigue vigente; al ser
 	// un único UPDATE, dos peticiones concurrentes no pueden consumirlo dos veces.
 	ConsumeEmailToken(ctx context.Context, arg ConsumeEmailTokenParams) (uuid.UUID, error)
@@ -70,6 +75,8 @@ type Querier interface {
 	IsAccessTokenRevoked(ctx context.Context, jti uuid.UUID) (bool, error)
 	ListReviewsByTarget(ctx context.Context, arg ListReviewsByTargetParams) ([]ListReviewsByTargetRow, error)
 	ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]ListTracksByAlbumRow, error)
+	// Backoff exponencial: retry_base_seconds · 2^intentos.
+	MarkArtistEnrichmentFailed(ctx context.Context, arg MarkArtistEnrichmentFailedParams) error
 	MarkEmailFailed(ctx context.Context, arg MarkEmailFailedParams) error
 	MarkEmailRetry(ctx context.Context, arg MarkEmailRetryParams) error
 	MarkEmailSent(ctx context.Context, id uuid.UUID) error
@@ -77,6 +84,8 @@ type Querier interface {
 	// Solo cuenta si embedding_attempts sigue siendo el que vio el worker: un
 	// mismo track que llegó dos veces (cola y rescan) no consume dos intentos.
 	MarkEmbeddingAttemptFailed(ctx context.Context, arg MarkEmbeddingAttemptFailedParams) error
+	// give_up (la canción ya no existe en Spotify) agota los intentos.
+	MarkSongLinkFailed(ctx context.Context, arg MarkSongLinkFailedParams) error
 	PurgeExpiredEmailTokens(ctx context.Context) (int64, error)
 	PurgeExpiredRevokedTokens(ctx context.Context) (int64, error)
 	// PurgeOldOutbox borra los correos ya resueltos: contienen enlaces con token.
@@ -98,16 +107,22 @@ type Querier interface {
 	// Coldplay" y a "Espresso Sabrina Carpenter" le falta una palabra en "Nonsense
 	// Sabrina Carpenter" (0.67). similarity() desempata a favor del texto más
 	// parecido en total (el título exacto antes que uno que solo lo contiene).
+	// album_id, link_attempts y los campos artist_* (salvo la imagen) no se
+	// exponen: el servicio los usa para decidir qué completar con Spotify.
 	SearchTracksTrigram(ctx context.Context, arg SearchTracksTrigramParams) ([]SearchTracksTrigramRow, error)
 	SetRefreshTokenReplacedBy(ctx context.Context, arg SetRefreshTokenReplacedByParams) error
+	// --- Enriquecimiento con Spotify (imágenes de artistas y enlace de canciones del CSV) ---
+	// UpdateArtistEnrichment guarda lo que devolvió GET /v1/artists/{id} y marca
+	// al artista como consultado aunque Spotify no tenga imagen.
+	UpdateArtistEnrichment(ctx context.Context, arg UpdateArtistEnrichmentParams) (sql.NullString, error)
 	UpdateReview(ctx context.Context, arg UpdateReviewParams) (int64, error)
 	UpdateSongAudioFeaturesAndEmbedding(ctx context.Context, arg UpdateSongAudioFeaturesAndEmbeddingParams) (int64, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error
-	UpsertAlbum(ctx context.Context, arg UpsertAlbumParams) (uuid.UUID, error)
+	UpsertAlbum(ctx context.Context, arg UpsertAlbumParams) (UpsertAlbumRow, error)
 	UpsertAlbumRating(ctx context.Context, arg UpsertAlbumRatingParams) (UpsertAlbumRatingRow, error)
 	// Los artistas simplificados de una búsqueda de canciones no traen géneros,
 	// popularidad ni imagen: en conflicto no se pisan los valores conocidos.
-	UpsertArtistBySpotifyID(ctx context.Context, arg UpsertArtistBySpotifyIDParams) (uuid.UUID, error)
+	UpsertArtistBySpotifyID(ctx context.Context, arg UpsertArtistBySpotifyIDParams) (UpsertArtistBySpotifyIDRow, error)
 	UpsertArtistRating(ctx context.Context, arg UpsertArtistRatingParams) (UpsertArtistRatingRow, error)
 	// Una canción del CSV que ya tiene embedding conserva sus datos históricos;
 	// solo se completan los enlaces y el ISRC. pending_embedding queda TRUE solo

@@ -38,6 +38,10 @@ type Config struct {
 	// SearchFallbackThreshold es el puntaje mínimo del mejor resultado
 	// local para no consultar Spotify, en (0, 1] (default 0.8).
 	SearchFallbackThreshold float64
+	// SearchEnrichBudget es cuánto espera la búsqueda a Spotify para
+	// completar imágenes de artistas y portadas que faltan (default 2s). Lo
+	// que no termina a tiempo lo completa un worker en segundo plano.
+	SearchEnrichBudget time.Duration
 	// CORSAllowedOrigins son los orígenes (esquema://host[:puerto]) del
 	// frontend que pueden llamar a la API desde el navegador
 	// (default http://localhost:5173).
@@ -129,6 +133,12 @@ func Load(envFile string) (*Config, error) {
 	}
 	cfg.SearchFallbackThreshold = threshold
 
+	enrichBudget, err := durationOr("SEARCH_ENRICH_BUDGET", 2*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	cfg.SearchEnrichBudget = enrichBudget
+
 	resetTTL, err := durationOr("PASSWORD_RESET_TTL", 30*time.Minute)
 	if err != nil {
 		return nil, err
@@ -171,6 +181,9 @@ func (c *Config) validate() error {
 	}
 	if c.SearchFallbackThreshold <= 0 || c.SearchFallbackThreshold > 1 {
 		return fmt.Errorf("config: SEARCH_FALLBACK_THRESHOLD debe estar en (0, 1]")
+	}
+	if c.SearchEnrichBudget <= 0 {
+		return fmt.Errorf("config: SEARCH_ENRICH_BUDGET debe ser positivo")
 	}
 	// Una lista vacía o un comodín abrirían la API a cualquier origen.
 	if len(c.CORSAllowedOrigins) == 0 {

@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/google/uuid"
-
 	"github.com/xcxsar/junkbox-backend/internal/core/domain"
 	"github.com/xcxsar/junkbox-backend/internal/store/sqlc"
 )
@@ -28,11 +26,11 @@ func (c *CatalogImporter) ImportTracks(ctx context.Context, tracks []domain.Impo
 	out := make([]domain.ImportedSong, 0, len(tracks))
 	err := c.inTx(ctx, func(q *sqlc.Queries) error {
 		for _, t := range tracks {
-			artistID, err := upsertArtist(ctx, q, t.Artist)
+			artist, err := upsertArtist(ctx, q, t.Artist)
 			if err != nil {
 				return err
 			}
-			albumID, err := upsertAlbum(ctx, q, t.Album)
+			album, err := upsertAlbum(ctx, q, t.Album)
 			if err != nil {
 				return err
 			}
@@ -44,8 +42,8 @@ func (c *CatalogImporter) ImportTracks(ctx context.Context, tracks []domain.Impo
 				Year:       nullInt32(t.Album.ReleaseYear),
 				DurationMs: nullInt32(t.DurationMs),
 				Isrc:       nullString(t.ISRC),
-				ArtistID:   &artistID,
-				AlbumID:    &albumID,
+				ArtistID:   &artist.ID,
+				AlbumID:    &album.ID,
 			})
 			if err != nil {
 				return fmt.Errorf("guardar canción %s: %w", t.SpotifyID, err)
@@ -58,6 +56,8 @@ func (c *CatalogImporter) ImportTracks(ctx context.Context, tracks []domain.Impo
 					TrackName:        row.TrackName.String,
 					ArtistName:       row.ArtistName.String,
 					AlbumTitle:       &albumTitle,
+					AlbumImageURL:    stringPtr(album.ImageUrl),
+					ArtistImageURL:   stringPtr(artist.ImageUrl),
 					Year:             int32Ptr(row.Year),
 					Genre:            stringPtr(row.Genre),
 					Popularity:       int32Ptr(row.Popularity),
@@ -65,8 +65,11 @@ func (c *CatalogImporter) ImportTracks(ctx context.Context, tracks []domain.Impo
 					HasEmbedding:     row.HasEmbedding,
 					PendingEmbedding: row.PendingEmbedding,
 				},
-				ISRC:              stringPtr(row.Isrc),
-				EmbeddingAttempts: row.EmbeddingAttempts,
+				ISRC:                 stringPtr(row.Isrc),
+				EmbeddingAttempts:    row.EmbeddingAttempts,
+				ArtistSpotifyID:      t.Artist.SpotifyID,
+				ArtistEnriched:       artist.Enriched,
+				ArtistEnrichAttempts: artist.EnrichAttempts,
 			}
 			out = append(out, song)
 		}
@@ -83,11 +86,11 @@ func (c *CatalogImporter) ImportArtists(ctx context.Context, artists []domain.Im
 	out := make([]domain.Artist, 0, len(artists))
 	err := c.inTx(ctx, func(q *sqlc.Queries) error {
 		for _, a := range artists {
-			id, err := upsertArtist(ctx, q, a)
+			artist, err := upsertArtist(ctx, q, a)
 			if err != nil {
 				return err
 			}
-			row, err := q.GetArtist(ctx, sqlc.GetArtistParams{ID: id})
+			row, err := q.GetArtist(ctx, sqlc.GetArtistParams{ID: artist.ID})
 			if err != nil {
 				return fmt.Errorf("leer artista %s: %w", a.SpotifyID, err)
 			}
@@ -119,11 +122,11 @@ func (c *CatalogImporter) ImportAlbums(ctx context.Context, albums []domain.Impo
 	out := make([]domain.Album, 0, len(albums))
 	err := c.inTx(ctx, func(q *sqlc.Queries) error {
 		for _, a := range albums {
-			id, err := upsertAlbum(ctx, q, a)
+			album, err := upsertAlbum(ctx, q, a)
 			if err != nil {
 				return err
 			}
-			row, err := q.GetAlbum(ctx, sqlc.GetAlbumParams{ID: id})
+			row, err := q.GetAlbum(ctx, sqlc.GetAlbumParams{ID: album.ID})
 			if err != nil {
 				return fmt.Errorf("leer álbum %s: %w", a.SpotifyID, err)
 			}
@@ -159,8 +162,10 @@ func (c *CatalogImporter) inTx(ctx context.Context, fn func(q *sqlc.Queries) err
 
 // upsertArtist resuelve el artista en tres pasos: (1) ya existe con ese
 // spotify_id → se actualiza; (2) hay un artista del CSV homónimo sin
-// spotify_id → se reclama; (3) si no, se inserta uno nuevo.
-func upsertArtist(ctx context.Context, q *sqlc.Queries, a domain.ImportedArtist) (uuid.UUID, error) {
+// spotify_id → se reclama; (3) si no, se inserta uno nuevo. Devuelve la
+// imagen ya guardada (un artista simplificado no trae la suya) y si ya se
+// consultó en Spotify.
+func upsertArtist(ctx context.Context, q *sqlc.Queries, a domain.ImportedArtist) (sqlc.UpsertArtistBySpotifyIDRow, error) {
 	genres := a.Genres
 	if genres == nil {
 		genres = []string{}
@@ -178,10 +183,10 @@ func upsertArtist(ctx context.Context, q *sqlc.Queries, a domain.ImportedArtist)
 	case err == nil:
 		return wrapArtist(q.UpsertArtistBySpotifyID(ctx, upsert))
 	case !errors.Is(err, sql.ErrNoRows):
-		return uuid.Nil, fmt.Errorf("buscar artista %s: %w", a.SpotifyID, err)
+		return sqlc.UpsertArtistBySpotifyIDRow{}, fmt.Errorf("buscar artista %s: %w", a.SpotifyID, err)
 	}
 
-	id, err := q.ClaimArtistByName(ctx, sqlc.ClaimArtistByNameParams{
+	claimed, err := q.ClaimArtistByName(ctx, sqlc.ClaimArtistByNameParams{
 		SpotifyID:  upsert.SpotifyID,
 		Genres:     genres,
 		Popularity: upsert.Popularity,
@@ -190,34 +195,34 @@ func upsertArtist(ctx context.Context, q *sqlc.Queries, a domain.ImportedArtist)
 	})
 	switch {
 	case err == nil:
-		return id, nil
+		return sqlc.UpsertArtistBySpotifyIDRow(claimed), nil
 	case !errors.Is(err, sql.ErrNoRows):
-		return uuid.Nil, fmt.Errorf("reclamar artista %s: %w", a.SpotifyID, err)
+		return sqlc.UpsertArtistBySpotifyIDRow{}, fmt.Errorf("reclamar artista %s: %w", a.SpotifyID, err)
 	}
 
 	return wrapArtist(q.UpsertArtistBySpotifyID(ctx, upsert))
 }
 
-func wrapArtist(id uuid.UUID, err error) (uuid.UUID, error) {
+func wrapArtist(row sqlc.UpsertArtistBySpotifyIDRow, err error) (sqlc.UpsertArtistBySpotifyIDRow, error) {
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("guardar artista: %w", err)
+		return sqlc.UpsertArtistBySpotifyIDRow{}, fmt.Errorf("guardar artista: %w", err)
 	}
-	return id, nil
+	return row, nil
 }
 
-func upsertAlbum(ctx context.Context, q *sqlc.Queries, a domain.ImportedAlbum) (uuid.UUID, error) {
-	artistID, err := upsertArtist(ctx, q, a.Artist)
+func upsertAlbum(ctx context.Context, q *sqlc.Queries, a domain.ImportedAlbum) (sqlc.UpsertAlbumRow, error) {
+	artist, err := upsertArtist(ctx, q, a.Artist)
 	if err != nil {
-		return uuid.Nil, err
+		return sqlc.UpsertAlbumRow{}, err
 	}
 	albumType := a.AlbumType
 	if albumType == "" {
 		albumType = "album"
 	}
-	id, err := q.UpsertAlbum(ctx, sqlc.UpsertAlbumParams{
+	row, err := q.UpsertAlbum(ctx, sqlc.UpsertAlbumParams{
 		SpotifyID:   nonEmpty(a.SpotifyID),
 		Title:       a.Title,
-		ArtistID:    &artistID,
+		ArtistID:    &artist.ID,
 		ArtistName:  a.Artist.Name,
 		ReleaseYear: nullInt32(a.ReleaseYear),
 		AlbumType:   albumType,
@@ -225,9 +230,9 @@ func upsertAlbum(ctx context.Context, q *sqlc.Queries, a domain.ImportedAlbum) (
 		TotalTracks: a.TotalTracks,
 	})
 	if err != nil {
-		return uuid.Nil, fmt.Errorf("guardar álbum %s: %w", a.SpotifyID, err)
+		return sqlc.UpsertAlbumRow{}, fmt.Errorf("guardar álbum %s: %w", a.SpotifyID, err)
 	}
-	return id, nil
+	return row, nil
 }
 
 // --- conversión entre punteros y tipos nulos de database/sql ---

@@ -379,7 +379,7 @@ func TestListReviewsPaginacion(t *testing.T) {
 
 func TestResolveTarget(t *testing.T) {
 	catalog := &fakeCatalog{track: &sqlc.GetTrackRow{ID: 10924}}
-	svc := NewMusicService(catalog, nil, nil, nil, 0)
+	svc := NewMusicService(catalog, nil, nil, nil, 0, SearchEnrichment{})
 
 	target, err := svc.ResolveTarget(context.Background(), domain.TargetSong, "4uLU6hMCjMI75M1A2tKUQC")
 	if err != nil {

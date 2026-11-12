@@ -27,7 +27,7 @@ WHERE id = (
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id
+RETURNING id, image_url, (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts
 `
 
 type ClaimArtistByNameParams struct {
@@ -38,9 +38,16 @@ type ClaimArtistByNameParams struct {
 	Name       string         `json:"name"`
 }
 
+type ClaimArtistByNameRow struct {
+	ID             uuid.UUID      `json:"id"`
+	ImageUrl       sql.NullString `json:"image_url"`
+	Enriched       bool           `json:"enriched"`
+	EnrichAttempts int32          `json:"enrich_attempts"`
+}
+
 // ClaimArtistByName asigna el spotify_id a un artista del CSV homónimo
 // (spotify_id NULL). No devuelve filas si no hay ninguno libre.
-func (q *Queries) ClaimArtistByName(ctx context.Context, arg ClaimArtistByNameParams) (uuid.UUID, error) {
+func (q *Queries) ClaimArtistByName(ctx context.Context, arg ClaimArtistByNameParams) (ClaimArtistByNameRow, error) {
 	row := q.db.QueryRowContext(ctx, claimArtistByName,
 		arg.SpotifyID,
 		pq.Array(arg.Genres),
@@ -48,9 +55,57 @@ func (q *Queries) ClaimArtistByName(ctx context.Context, arg ClaimArtistByNamePa
 		arg.ImageUrl,
 		arg.Name,
 	)
-	var id uuid.UUID
-	err := row.Scan(&id)
-	return id, err
+	var i ClaimArtistByNameRow
+	err := row.Scan(
+		&i.ID,
+		&i.ImageUrl,
+		&i.Enriched,
+		&i.EnrichAttempts,
+	)
+	return i, err
+}
+
+const claimArtistsForEnrichment = `-- name: ClaimArtistsForEnrichment :many
+UPDATE artists
+SET next_enrich_attempt_at = NOW() + make_interval(secs => $1::float8)
+WHERE spotify_id = ANY($2::text[])
+  AND image_url IS NULL
+  AND enriched_at IS NULL
+  AND enrich_attempts < $3::int
+  AND (next_enrich_attempt_at IS NULL OR next_enrich_attempt_at <= NOW())
+RETURNING spotify_id
+`
+
+type ClaimArtistsForEnrichmentParams struct {
+	LeaseSeconds float64  `json:"lease_seconds"`
+	SpotifyIds   []string `json:"spotify_ids"`
+	MaxAttempts  int32    `json:"max_attempts"`
+}
+
+// Los claims los usa solo el worker de respaldo: reservan con un lease los
+// pendientes cuyo reintento ya venció, para que otra réplica no los consulte
+// a la vez. La búsqueda síncrona no reserva (su presupuesto es corto).
+func (q *Queries) ClaimArtistsForEnrichment(ctx context.Context, arg ClaimArtistsForEnrichmentParams) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, claimArtistsForEnrichment, arg.LeaseSeconds, pq.Array(arg.SpotifyIds), arg.MaxAttempts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []sql.NullString
+	for rows.Next() {
+		var spotify_id sql.NullString
+		if err := rows.Scan(&spotify_id); err != nil {
+			return nil, err
+		}
+		items = append(items, spotify_id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const claimPendingEmbeddingTracks = `-- name: ClaimPendingEmbeddingTracks :many
@@ -100,6 +155,45 @@ func (q *Queries) ClaimPendingEmbeddingTracks(ctx context.Context, arg ClaimPend
 			return nil, err
 		}
 		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const claimSongsForLinking = `-- name: ClaimSongsForLinking :many
+UPDATE song_metadata
+SET next_link_attempt_at = NOW() + make_interval(secs => $1::float8)
+WHERE track_id = ANY($2::text[])
+  AND album_id IS NULL
+  AND link_attempts < $3::int
+  AND (next_link_attempt_at IS NULL OR next_link_attempt_at <= NOW())
+RETURNING track_id
+`
+
+type ClaimSongsForLinkingParams struct {
+	LeaseSeconds float64  `json:"lease_seconds"`
+	TrackIds     []string `json:"track_ids"`
+	MaxAttempts  int32    `json:"max_attempts"`
+}
+
+func (q *Queries) ClaimSongsForLinking(ctx context.Context, arg ClaimSongsForLinkingParams) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, claimSongsForLinking, arg.LeaseSeconds, pq.Array(arg.TrackIds), arg.MaxAttempts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []sql.NullString
+	for rows.Next() {
+		var track_id sql.NullString
+		if err := rows.Scan(&track_id); err != nil {
+			return nil, err
+		}
+		items = append(items, track_id)
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err
@@ -272,9 +366,12 @@ SELECT
     s.time_signature, s.pending_embedding,
     (s.embedding IS NOT NULL)::bool AS has_embedding,
     al.title AS album_title,
+    al.image_url AS album_image_url,
+    ar.image_url AS artist_image_url,
     s.ratings_count, s.avg_rating
 FROM song_metadata s
 LEFT JOIN albums al ON al.id = s.album_id
+LEFT JOIN artists ar ON ar.id = s.artist_id
 WHERE s.id = $1::int OR s.track_id = $2::text
 LIMIT 1
 `
@@ -311,6 +408,8 @@ type GetTrackRow struct {
 	PendingEmbedding bool            `json:"pending_embedding"`
 	HasEmbedding     bool            `json:"has_embedding"`
 	AlbumTitle       sql.NullString  `json:"album_title"`
+	AlbumImageUrl    sql.NullString  `json:"album_image_url"`
+	ArtistImageUrl   sql.NullString  `json:"artist_image_url"`
 	RatingsCount     int32           `json:"ratings_count"`
 	AvgRating        *float64        `json:"avg_rating"`
 }
@@ -347,6 +446,8 @@ func (q *Queries) GetTrack(ctx context.Context, arg GetTrackParams) (GetTrackRow
 		&i.PendingEmbedding,
 		&i.HasEmbedding,
 		&i.AlbumTitle,
+		&i.AlbumImageUrl,
+		&i.ArtistImageUrl,
 		&i.RatingsCount,
 		&i.AvgRating,
 	)
@@ -355,12 +456,14 @@ func (q *Queries) GetTrack(ctx context.Context, arg GetTrackParams) (GetTrackRow
 
 const listTracksByAlbum = `-- name: ListTracksByAlbum :many
 SELECT
-    id, track_id, track_name, artist_name, year, genre, popularity,
-    duration_ms, pending_embedding,
-    (embedding IS NOT NULL)::bool AS has_embedding
-FROM song_metadata
-WHERE album_id = $1
-ORDER BY id
+    s.id, s.track_id, s.track_name, s.artist_name, s.year, s.genre,
+    s.popularity, s.duration_ms, s.pending_embedding,
+    (s.embedding IS NOT NULL)::bool AS has_embedding,
+    ar.image_url AS artist_image_url
+FROM song_metadata s
+LEFT JOIN artists ar ON ar.id = s.artist_id
+WHERE s.album_id = $1
+ORDER BY s.id
 `
 
 type ListTracksByAlbumRow struct {
@@ -374,6 +477,7 @@ type ListTracksByAlbumRow struct {
 	DurationMs       sql.NullInt32  `json:"duration_ms"`
 	PendingEmbedding bool           `json:"pending_embedding"`
 	HasEmbedding     bool           `json:"has_embedding"`
+	ArtistImageUrl   sql.NullString `json:"artist_image_url"`
 }
 
 func (q *Queries) ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]ListTracksByAlbumRow, error) {
@@ -396,6 +500,7 @@ func (q *Queries) ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]
 			&i.DurationMs,
 			&i.PendingEmbedding,
 			&i.HasEmbedding,
+			&i.ArtistImageUrl,
 		); err != nil {
 			return nil, err
 		}
@@ -408,6 +513,24 @@ func (q *Queries) ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]
 		return nil, err
 	}
 	return items, nil
+}
+
+const markArtistEnrichmentFailed = `-- name: MarkArtistEnrichmentFailed :exec
+UPDATE artists
+SET enrich_attempts = enrich_attempts + 1,
+    next_enrich_attempt_at = NOW() + make_interval(secs => $1::float8 * power(2, least(enrich_attempts, 10)))
+WHERE spotify_id = $2 AND enriched_at IS NULL
+`
+
+type MarkArtistEnrichmentFailedParams struct {
+	RetryBaseSeconds float64        `json:"retry_base_seconds"`
+	SpotifyID        sql.NullString `json:"spotify_id"`
+}
+
+// Backoff exponencial: retry_base_seconds · 2^intentos.
+func (q *Queries) MarkArtistEnrichmentFailed(ctx context.Context, arg MarkArtistEnrichmentFailedParams) error {
+	_, err := q.db.ExecContext(ctx, markArtistEnrichmentFailed, arg.RetryBaseSeconds, arg.SpotifyID)
+	return err
 }
 
 const markEmbeddingAttemptFailed = `-- name: MarkEmbeddingAttemptFailed :exec
@@ -429,6 +552,31 @@ type MarkEmbeddingAttemptFailedParams struct {
 // mismo track que llegó dos veces (cola y rescan) no consume dos intentos.
 func (q *Queries) MarkEmbeddingAttemptFailed(ctx context.Context, arg MarkEmbeddingAttemptFailedParams) error {
 	_, err := q.db.ExecContext(ctx, markEmbeddingAttemptFailed, arg.RetryInSeconds, arg.TrackID, arg.Attempts)
+	return err
+}
+
+const markSongLinkFailed = `-- name: MarkSongLinkFailed :exec
+UPDATE song_metadata
+SET link_attempts = CASE WHEN $1::bool THEN greatest(link_attempts, $2::int) ELSE link_attempts + 1 END,
+    next_link_attempt_at = NOW() + make_interval(secs => $3::float8 * power(2, least(link_attempts, 10)))
+WHERE track_id = $4 AND album_id IS NULL
+`
+
+type MarkSongLinkFailedParams struct {
+	GiveUp           bool           `json:"give_up"`
+	MaxAttempts      int32          `json:"max_attempts"`
+	RetryBaseSeconds float64        `json:"retry_base_seconds"`
+	TrackID          sql.NullString `json:"track_id"`
+}
+
+// give_up (la canción ya no existe en Spotify) agota los intentos.
+func (q *Queries) MarkSongLinkFailed(ctx context.Context, arg MarkSongLinkFailedParams) error {
+	_, err := q.db.ExecContext(ctx, markSongLinkFailed,
+		arg.GiveUp,
+		arg.MaxAttempts,
+		arg.RetryBaseSeconds,
+		arg.TrackID,
+	)
 	return err
 }
 
@@ -500,6 +648,7 @@ func (q *Queries) SearchAlbumsTrigram(ctx context.Context, arg SearchAlbumsTrigr
 const searchArtistsTrigram = `-- name: SearchArtistsTrigram :many
 SELECT
     id, spotify_id, name, genres, popularity, image_url, created_at,
+    (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts,
     strict_word_similarity($1::text, name)::float8 AS score
 FROM artists
 WHERE $1::text <<% name
@@ -513,14 +662,16 @@ type SearchArtistsTrigramParams struct {
 }
 
 type SearchArtistsTrigramRow struct {
-	ID         uuid.UUID      `json:"id"`
-	SpotifyID  sql.NullString `json:"spotify_id"`
-	Name       string         `json:"name"`
-	Genres     []string       `json:"genres"`
-	Popularity sql.NullInt32  `json:"popularity"`
-	ImageUrl   sql.NullString `json:"image_url"`
-	CreatedAt  time.Time      `json:"created_at"`
-	Score      float64        `json:"score"`
+	ID             uuid.UUID      `json:"id"`
+	SpotifyID      sql.NullString `json:"spotify_id"`
+	Name           string         `json:"name"`
+	Genres         []string       `json:"genres"`
+	Popularity     sql.NullInt32  `json:"popularity"`
+	ImageUrl       sql.NullString `json:"image_url"`
+	CreatedAt      time.Time      `json:"created_at"`
+	Enriched       bool           `json:"enriched"`
+	EnrichAttempts int32          `json:"enrich_attempts"`
+	Score          float64        `json:"score"`
 }
 
 func (q *Queries) SearchArtistsTrigram(ctx context.Context, arg SearchArtistsTrigramParams) ([]SearchArtistsTrigramRow, error) {
@@ -540,6 +691,8 @@ func (q *Queries) SearchArtistsTrigram(ctx context.Context, arg SearchArtistsTri
 			&i.Popularity,
 			&i.ImageUrl,
 			&i.CreatedAt,
+			&i.Enriched,
+			&i.EnrichAttempts,
 			&i.Score,
 		); err != nil {
 			return nil, err
@@ -563,9 +716,16 @@ SELECT
     s.popularity, s.duration_ms, s.pending_embedding,
     (s.embedding IS NOT NULL)::bool AS has_embedding,
     al.title AS album_title,
+    al.image_url AS album_image_url,
+    ar.image_url AS artist_image_url,
+    ar.spotify_id AS artist_spotify_id,
+    (ar.enriched_at IS NOT NULL)::bool AS artist_enriched,
+    coalesce(ar.enrich_attempts, 0)::int AS artist_enrich_attempts,
+    s.album_id, s.link_attempts,
     strict_word_similarity($1::text, coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, ''))::float8 AS score
 FROM song_metadata s
 LEFT JOIN albums al ON al.id = s.album_id
+LEFT JOIN artists ar ON ar.id = s.artist_id
 WHERE $1::text <<% (coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, ''))
 ORDER BY score DESC,
     similarity($1::text, coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, '')) DESC,
@@ -579,18 +739,25 @@ type SearchTracksTrigramParams struct {
 }
 
 type SearchTracksTrigramRow struct {
-	ID               int32          `json:"id"`
-	TrackID          sql.NullString `json:"track_id"`
-	TrackName        sql.NullString `json:"track_name"`
-	ArtistName       sql.NullString `json:"artist_name"`
-	Year             sql.NullInt32  `json:"year"`
-	Genre            sql.NullString `json:"genre"`
-	Popularity       sql.NullInt32  `json:"popularity"`
-	DurationMs       sql.NullInt32  `json:"duration_ms"`
-	PendingEmbedding bool           `json:"pending_embedding"`
-	HasEmbedding     bool           `json:"has_embedding"`
-	AlbumTitle       sql.NullString `json:"album_title"`
-	Score            float64        `json:"score"`
+	ID                   int32          `json:"id"`
+	TrackID              sql.NullString `json:"track_id"`
+	TrackName            sql.NullString `json:"track_name"`
+	ArtistName           sql.NullString `json:"artist_name"`
+	Year                 sql.NullInt32  `json:"year"`
+	Genre                sql.NullString `json:"genre"`
+	Popularity           sql.NullInt32  `json:"popularity"`
+	DurationMs           sql.NullInt32  `json:"duration_ms"`
+	PendingEmbedding     bool           `json:"pending_embedding"`
+	HasEmbedding         bool           `json:"has_embedding"`
+	AlbumTitle           sql.NullString `json:"album_title"`
+	AlbumImageUrl        sql.NullString `json:"album_image_url"`
+	ArtistImageUrl       sql.NullString `json:"artist_image_url"`
+	ArtistSpotifyID      sql.NullString `json:"artist_spotify_id"`
+	ArtistEnriched       bool           `json:"artist_enriched"`
+	ArtistEnrichAttempts int32          `json:"artist_enrich_attempts"`
+	AlbumID              *uuid.UUID     `json:"album_id"`
+	LinkAttempts         int32          `json:"link_attempts"`
+	Score                float64        `json:"score"`
 }
 
 // Consultas del catálogo musical (Fase 3). Ninguna selecciona la columna
@@ -603,6 +770,8 @@ type SearchTracksTrigramRow struct {
 // Coldplay" y a "Espresso Sabrina Carpenter" le falta una palabra en "Nonsense
 // Sabrina Carpenter" (0.67). similarity() desempata a favor del texto más
 // parecido en total (el título exacto antes que uno que solo lo contiene).
+// album_id, link_attempts y los campos artist_* (salvo la imagen) no se
+// exponen: el servicio los usa para decidir qué completar con Spotify.
 func (q *Queries) SearchTracksTrigram(ctx context.Context, arg SearchTracksTrigramParams) ([]SearchTracksTrigramRow, error) {
 	rows, err := q.db.QueryContext(ctx, searchTracksTrigram, arg.Query, arg.MaxResults)
 	if err != nil {
@@ -624,6 +793,13 @@ func (q *Queries) SearchTracksTrigram(ctx context.Context, arg SearchTracksTrigr
 			&i.PendingEmbedding,
 			&i.HasEmbedding,
 			&i.AlbumTitle,
+			&i.AlbumImageUrl,
+			&i.ArtistImageUrl,
+			&i.ArtistSpotifyID,
+			&i.ArtistEnriched,
+			&i.ArtistEnrichAttempts,
+			&i.AlbumID,
+			&i.LinkAttempts,
 			&i.Score,
 		); err != nil {
 			return nil, err
@@ -637,6 +813,40 @@ func (q *Queries) SearchTracksTrigram(ctx context.Context, arg SearchTracksTrigr
 		return nil, err
 	}
 	return items, nil
+}
+
+const updateArtistEnrichment = `-- name: UpdateArtistEnrichment :one
+
+UPDATE artists
+SET genres = CASE WHEN cardinality($1::text[]) > 0 THEN $1::text[] ELSE genres END,
+    popularity = coalesce($2, popularity),
+    image_url = coalesce($3, image_url),
+    enriched_at = NOW(),
+    next_enrich_attempt_at = NULL
+WHERE spotify_id = $4
+RETURNING image_url
+`
+
+type UpdateArtistEnrichmentParams struct {
+	Genres     []string       `json:"genres"`
+	Popularity sql.NullInt32  `json:"popularity"`
+	ImageUrl   sql.NullString `json:"image_url"`
+	SpotifyID  sql.NullString `json:"spotify_id"`
+}
+
+// --- Enriquecimiento con Spotify (imágenes de artistas y enlace de canciones del CSV) ---
+// UpdateArtistEnrichment guarda lo que devolvió GET /v1/artists/{id} y marca
+// al artista como consultado aunque Spotify no tenga imagen.
+func (q *Queries) UpdateArtistEnrichment(ctx context.Context, arg UpdateArtistEnrichmentParams) (sql.NullString, error) {
+	row := q.db.QueryRowContext(ctx, updateArtistEnrichment,
+		pq.Array(arg.Genres),
+		arg.Popularity,
+		arg.ImageUrl,
+		arg.SpotifyID,
+	)
+	var image_url sql.NullString
+	err := row.Scan(&image_url)
+	return image_url, err
 }
 
 const updateSongAudioFeaturesAndEmbedding = `-- name: UpdateSongAudioFeaturesAndEmbedding :execrows
@@ -714,7 +924,7 @@ ON CONFLICT (spotify_id) DO UPDATE SET
     album_type = EXCLUDED.album_type,
     image_url = coalesce(EXCLUDED.image_url, albums.image_url),
     total_tracks = EXCLUDED.total_tracks
-RETURNING id
+RETURNING id, image_url
 `
 
 type UpsertAlbumParams struct {
@@ -728,7 +938,12 @@ type UpsertAlbumParams struct {
 	TotalTracks int32          `json:"total_tracks"`
 }
 
-func (q *Queries) UpsertAlbum(ctx context.Context, arg UpsertAlbumParams) (uuid.UUID, error) {
+type UpsertAlbumRow struct {
+	ID       uuid.UUID      `json:"id"`
+	ImageUrl sql.NullString `json:"image_url"`
+}
+
+func (q *Queries) UpsertAlbum(ctx context.Context, arg UpsertAlbumParams) (UpsertAlbumRow, error) {
 	row := q.db.QueryRowContext(ctx, upsertAlbum,
 		arg.SpotifyID,
 		arg.Title,
@@ -739,9 +954,9 @@ func (q *Queries) UpsertAlbum(ctx context.Context, arg UpsertAlbumParams) (uuid.
 		arg.ImageUrl,
 		arg.TotalTracks,
 	)
-	var id uuid.UUID
-	err := row.Scan(&id)
-	return id, err
+	var i UpsertAlbumRow
+	err := row.Scan(&i.ID, &i.ImageUrl)
+	return i, err
 }
 
 const upsertArtistBySpotifyID = `-- name: UpsertArtistBySpotifyID :one
@@ -752,7 +967,7 @@ ON CONFLICT (spotify_id) DO UPDATE SET
     genres = CASE WHEN cardinality(EXCLUDED.genres) > 0 THEN EXCLUDED.genres ELSE artists.genres END,
     popularity = coalesce(EXCLUDED.popularity, artists.popularity),
     image_url = coalesce(EXCLUDED.image_url, artists.image_url)
-RETURNING id
+RETURNING id, image_url, (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts
 `
 
 type UpsertArtistBySpotifyIDParams struct {
@@ -763,9 +978,16 @@ type UpsertArtistBySpotifyIDParams struct {
 	ImageUrl   sql.NullString `json:"image_url"`
 }
 
+type UpsertArtistBySpotifyIDRow struct {
+	ID             uuid.UUID      `json:"id"`
+	ImageUrl       sql.NullString `json:"image_url"`
+	Enriched       bool           `json:"enriched"`
+	EnrichAttempts int32          `json:"enrich_attempts"`
+}
+
 // Los artistas simplificados de una búsqueda de canciones no traen géneros,
 // popularidad ni imagen: en conflicto no se pisan los valores conocidos.
-func (q *Queries) UpsertArtistBySpotifyID(ctx context.Context, arg UpsertArtistBySpotifyIDParams) (uuid.UUID, error) {
+func (q *Queries) UpsertArtistBySpotifyID(ctx context.Context, arg UpsertArtistBySpotifyIDParams) (UpsertArtistBySpotifyIDRow, error) {
 	row := q.db.QueryRowContext(ctx, upsertArtistBySpotifyID,
 		arg.SpotifyID,
 		arg.Name,
@@ -773,9 +995,14 @@ func (q *Queries) UpsertArtistBySpotifyID(ctx context.Context, arg UpsertArtistB
 		arg.Popularity,
 		arg.ImageUrl,
 	)
-	var id uuid.UUID
-	err := row.Scan(&id)
-	return id, err
+	var i UpsertArtistBySpotifyIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.ImageUrl,
+		&i.Enriched,
+		&i.EnrichAttempts,
+	)
+	return i, err
 }
 
 const upsertSongFromSpotify = `-- name: UpsertSongFromSpotify :one

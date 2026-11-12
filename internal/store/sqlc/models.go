@@ -73,17 +73,20 @@ type Album struct {
 }
 
 type Artist struct {
-	ID           uuid.UUID      `json:"id"`
-	SpotifyID    sql.NullString `json:"spotify_id"`
-	Name         string         `json:"name"`
-	Genres       []string       `json:"genres"`
-	Popularity   sql.NullInt32  `json:"popularity"`
-	ImageUrl     sql.NullString `json:"image_url"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
-	RatingsCount int32          `json:"ratings_count"`
-	RatingsSum   float64        `json:"ratings_sum"`
-	AvgRating    *float64       `json:"avg_rating"`
+	ID                  uuid.UUID      `json:"id"`
+	SpotifyID           sql.NullString `json:"spotify_id"`
+	Name                string         `json:"name"`
+	Genres              []string       `json:"genres"`
+	Popularity          sql.NullInt32  `json:"popularity"`
+	ImageUrl            sql.NullString `json:"image_url"`
+	CreatedAt           time.Time      `json:"created_at"`
+	UpdatedAt           time.Time      `json:"updated_at"`
+	RatingsCount        int32          `json:"ratings_count"`
+	RatingsSum          float64        `json:"ratings_sum"`
+	AvgRating           *float64       `json:"avg_rating"`
+	EnrichedAt          sql.NullTime   `json:"enriched_at"`
+	EnrichAttempts      int32          `json:"enrich_attempts"`
+	NextEnrichAttemptAt sql.NullTime   `json:"next_enrich_attempt_at"`
 }
 
 type EmailOutbox struct {
@@ -175,6 +178,8 @@ type SongMetadatum struct {
 	RatingsCount           int32           `json:"ratings_count"`
 	RatingsSum             float64         `json:"ratings_sum"`
 	AvgRating              *float64        `json:"avg_rating"`
+	LinkAttempts           int32           `json:"link_attempts"`
+	NextLinkAttemptAt      sql.NullTime    `json:"next_link_attempt_at"`
 }
 
 type User struct {

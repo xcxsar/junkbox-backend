@@ -89,15 +89,9 @@ func runServer(cmd *cobra.Command) {
 		outboxWorker.Run(ctx)
 	}()
 
-	// 4. Catálogo musical: Spotify como respaldo de la búsqueda y worker de
-	// embeddings con FreqBlog. Ambos son opcionales.
-	var provider ports.MusicProvider
-	if cfg.SpotifyEnabled() {
-		provider = spotify.New(spotify.Config{ClientID: cfg.SpotifyClientID, ClientSecret: cfg.SpotifyClientSecret})
-	} else {
-		log.Println("aviso: sin SPOTIFY_CLIENT_ID/SPOTIFY_CLIENT_SECRET; la búsqueda será solo local")
-	}
-
+	// 4. Catálogo musical: Spotify como respaldo de la búsqueda (y para
+	// completar imágenes) y worker de embeddings con FreqBlog. Ambos son
+	// opcionales.
 	var queue ports.EmbeddingQueue
 	workerDone := make(chan struct{})
 	if cfg.FreqBlogAPIKey != "" {
@@ -111,7 +105,26 @@ func runServer(cmd *cobra.Command) {
 		close(workerDone)
 		log.Println("aviso: sin FREQBLOG_API_KEY; las canciones importadas quedarán sin embedding")
 	}
-	musicSvc := services.NewMusicService(queries, postgres.NewCatalogImporter(db), provider, queue, cfg.SearchFallbackThreshold)
+
+	importer := postgres.NewCatalogImporter(db)
+	var provider ports.MusicProvider
+	enrich := services.SearchEnrichment{Budget: cfg.SearchEnrichBudget}
+	enrichDone := make(chan struct{})
+	if cfg.SpotifyEnabled() {
+		spotifyClient := spotify.New(spotify.Config{ClientID: cfg.SpotifyClientID, ClientSecret: cfg.SpotifyClientSecret})
+		provider = spotifyClient
+		enrich.Enricher = services.NewCatalogEnricher(spotifyClient, queries, importer, queue)
+		enrichWorker := services.NewCatalogEnrichmentWorker(enrich.Enricher, services.CatalogEnrichmentWorkerConfig{})
+		enrich.Fallback = enrichWorker
+		go func() {
+			defer close(enrichDone)
+			enrichWorker.Run(ctx)
+		}()
+	} else {
+		close(enrichDone)
+		log.Println("aviso: sin SPOTIFY_CLIENT_ID/SPOTIFY_CLIENT_SECRET; la búsqueda será solo local")
+	}
+	musicSvc := services.NewMusicService(queries, importer, provider, queue, cfg.SearchFallbackThreshold, enrich)
 	ratingSvc := services.NewRatingService(queries, musicSvc)
 	reviewSvc := services.NewReviewService(queries, musicSvc)
 
@@ -152,8 +165,9 @@ func runServer(cmd *cobra.Command) {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		fatalf("shutdown: %v", err)
 	}
-	// El worker termina de guardar su último lote antes de cerrar el pool.
+	// Los workers terminan de guardar su último lote antes de cerrar el pool.
 	<-workerDone
+	<-enrichDone
 	<-outboxDone
 	log.Println("servidor detenido")
 }

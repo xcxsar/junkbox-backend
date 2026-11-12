@@ -5,6 +5,7 @@ package spotify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -134,6 +135,44 @@ func (c *Client) SearchAlbums(ctx context.Context, query string, limit int) ([]d
 		return len(resp.Albums.Items), resp.Albums.Next != nil, nil
 	})
 	return out, err
+}
+
+// --- detalle por ID ---
+
+// GetArtist obtiene el artista completo (con géneros e imagen). En
+// Development Mode no existe la versión por lotes (GET /v1/artists?ids=).
+func (c *Client) GetArtist(ctx context.Context, id string) (domain.ImportedArtist, error) {
+	var a artistObject
+	if err := c.getObject(ctx, "/v1/artists/"+url.PathEscape(id), &a); err != nil {
+		return domain.ImportedArtist{}, fmt.Errorf("spotify: artista %s: %w", id, err)
+	}
+	return a.toDomain(), nil
+}
+
+// GetTrack obtiene una canción con su álbum y artista principal.
+func (c *Client) GetTrack(ctx context.Context, id string) (domain.ImportedTrack, error) {
+	var t trackObject
+	if err := c.getObject(ctx, "/v1/tracks/"+url.PathEscape(id), &t); err != nil {
+		return domain.ImportedTrack{}, fmt.Errorf("spotify: canción %s: %w", id, err)
+	}
+	return t.toDomain(), nil
+}
+
+// getObject hace un GET y decodifica la respuesta en out. Un 404 o un 400
+// (ID inválido) se traducen a domain.ErrNotFound.
+func (c *Client) getObject(ctx context.Context, path string, out any) error {
+	body, err := c.get(ctx, path)
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && (apiErr.Status == http.StatusNotFound || apiErr.Status == http.StatusBadRequest) {
+			return domain.ErrNotFound
+		}
+		return err
+	}
+	if err := json.Unmarshal(body, out); err != nil {
+		return fmt.Errorf("decodificar respuesta: %w", err)
+	}
+	return nil
 }
 
 // search pagina /v1/search de pageSize en pageSize hasta juntar limit

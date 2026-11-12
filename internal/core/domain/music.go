@@ -40,12 +40,16 @@ type SearchResult struct {
 }
 
 // Track es una canción en listados (búsqueda y pistas de un álbum).
+// AlbumImageURL es la portada y ArtistImageURL la foto del artista
+// principal; son nil si aún no se conocen.
 type Track struct {
 	ID               int32   `json:"id"`
 	SpotifyID        string  `json:"spotify_id"`
 	TrackName        string  `json:"track_name"`
 	ArtistName       string  `json:"artist_name"`
 	AlbumTitle       *string `json:"album_title,omitempty"`
+	AlbumImageURL    *string `json:"album_image_url"`
+	ArtistImageURL   *string `json:"artist_image_url"`
 	Year             *int32  `json:"year"`
 	Genre            *string `json:"genre"`
 	Popularity       *int32  `json:"popularity"`
@@ -146,11 +150,33 @@ type ImportedTrack struct {
 }
 
 // ImportedSong es una canción ya persistida por CatalogImporter, con lo
-// necesario para responder y para encolarla en el worker de embeddings.
+// necesario para responder, para encolarla en el worker de embeddings y
+// para decidir si hay que pedir la imagen de su artista.
 type ImportedSong struct {
 	Track
-	ISRC              *string
-	EmbeddingAttempts int32
+	ISRC                 *string
+	EmbeddingAttempts    int32
+	ArtistSpotifyID      string
+	ArtistEnriched       bool
+	ArtistEnrichAttempts int32
+}
+
+// --- Enriquecimiento con Spotify ---
+
+// Tipos de EnrichmentJob.
+const (
+	// EnrichArtist pide GET /v1/artists/{id} para obtener la imagen.
+	EnrichArtist = "artist"
+	// EnrichTrack enlaza una canción del CSV con su álbum y artista
+	// (GET /v1/tracks/{id}).
+	EnrichTrack = "track"
+)
+
+// EnrichmentJob es un artista o una canción que le falta información de
+// Spotify. SpotifyID es el ID del artista o de la canción según Kind.
+type EnrichmentJob struct {
+	Kind      string
+	SpotifyID string
 }
 
 // --- Worker de embeddings ---

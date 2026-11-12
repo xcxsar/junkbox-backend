@@ -2,6 +2,7 @@ package ports
 
 import (
 	"context"
+	"database/sql"
 	"time"
 
 	"github.com/google/uuid"
@@ -35,6 +36,29 @@ type MusicProvider interface {
 	SearchTracks(ctx context.Context, query string, limit int) ([]domain.ImportedTrack, error)
 	SearchArtists(ctx context.Context, query string, limit int) ([]domain.ImportedArtist, error)
 	SearchAlbums(ctx context.Context, query string, limit int) ([]domain.ImportedAlbum, error)
+}
+
+// MusicMetadataProvider obtiene una entidad del catálogo externo por su ID
+// (Spotify). Si no existe, devuelve un error que envuelve domain.ErrNotFound.
+type MusicMetadataProvider interface {
+	GetArtist(ctx context.Context, id string) (domain.ImportedArtist, error)
+	GetTrack(ctx context.Context, id string) (domain.ImportedTrack, error)
+}
+
+// EnrichmentStore son las queries del enriquecimiento con Spotify. Los
+// claims los usa solo el worker de respaldo.
+type EnrichmentStore interface {
+	UpdateArtistEnrichment(ctx context.Context, arg sqlc.UpdateArtistEnrichmentParams) (sql.NullString, error)
+	MarkArtistEnrichmentFailed(ctx context.Context, arg sqlc.MarkArtistEnrichmentFailedParams) error
+	MarkSongLinkFailed(ctx context.Context, arg sqlc.MarkSongLinkFailedParams) error
+	ClaimArtistsForEnrichment(ctx context.Context, arg sqlc.ClaimArtistsForEnrichmentParams) ([]sql.NullString, error)
+	ClaimSongsForLinking(ctx context.Context, arg sqlc.ClaimSongsForLinkingParams) ([]sql.NullString, error)
+}
+
+// EnrichmentQueue recibe lo que la búsqueda no alcanzó a completar dentro
+// de su presupuesto. No debe bloquear.
+type EnrichmentQueue interface {
+	Enqueue(jobs ...domain.EnrichmentJob)
 }
 
 // AudioFeaturesProvider obtiene audio features por ISRC o Spotify ID

@@ -34,6 +34,7 @@ Este documento establece la especificación técnica, diseño de arquitectura y 
   - [4.5 Worker de Embeddings con FreqBlog](#45-worker-de-embeddings-con-freqblog)
   - [4.6 Núcleo: `MusicService`](#46-núcleo-musicservice)
   - [4.7 Adaptadores HTTP Chi: Endpoints de Música Protegidos con JWT](#47-adaptadores-http-chi-endpoints-de-música-protegidos-con-jwt)
+  - [4.8 Imágenes en la Búsqueda: Enriquecimiento con Spotify](#48-imágenes-en-la-búsqueda-enriquecimiento-con-spotify)
 - [5. AUTH-02: Recuperación de Contraseña y Verificación de Correo](#5-auth-02-recuperación-de-contraseña-y-verificación-de-correo)
   - [5.1 Contrato HTTP](#51-contrato-http)
   - [5.2 Esquema: `create_user_email_tokens_and_outbox`](#52-esquema-create_user_email_tokens_and_outbox)
@@ -1626,6 +1627,7 @@ Las rutas están en el grupo protegido por `AuthMiddleware` (`router.go`), en `h
 | `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` | No (ambas o ninguna) | — | Respaldo de la búsqueda en Spotify |
 | `FREQBLOG_API_KEY` | No | — | Worker de embeddings |
 | `SEARCH_FALLBACK_THRESHOLD` | No | `0.8` | Puntaje local mínimo, en $(0, 1]$, para no consultar Spotify |
+| `SEARCH_ENRICH_BUDGET` | No | `2s` | Espera máxima de la búsqueda para completar imágenes con Spotify (§4.8) |
 
 #### Pruebas (`make test`)
 
@@ -1657,6 +1659,82 @@ Las rutas están en el grupo protegido por `AuthMiddleware` (`router.go`), en `h
   - lotes de 100;
   - 429 con `Retry-After`;
   - 401.
+
+---
+
+### 4.8 Imágenes en la Búsqueda: Enriquecimiento con Spotify
+
+**Problema.** La barra de búsqueda mostraba los resultados sin imagen, salvo que la imagen ya estuviera en la BD:
+
+- `Track` no tenía campos de imagen, aunque la portada se guardaba al importar.
+- Los artistas que llegan dentro de una canción o un álbum vienen "simplificados" (sin imagen), y los del CSV nunca tuvieron.
+- Las canciones del CSV no tienen álbum.
+- Un cache-hit local nunca consulta Spotify, así que nada de esto se completaba.
+
+**Respuesta.** Cada canción expone `album_image_url` y `artist_image_url` (con `LEFT JOIN` a `albums` y `artists`), y la búsqueda completa lo que falta **antes de responder**.
+
+**Restricción de Spotify.** En febrero de 2026 Spotify eliminó, para las apps en Development Mode, los endpoints por lotes (*Get Several Artists/Albums/Tracks*). Hay que hacer una llamada por ID:
+
+| Falta | Llamada | Efecto |
+|---|---|---|
+| Imagen de un artista con `spotify_id` | `GET /v1/artists/{id}` | Guarda `image_url`, `genres` y `popularity`, y marca `enriched_at` (aunque no haya imagen) |
+| Álbum de una canción del CSV | `GET /v1/tracks/{id}` | Se importa con `ImportTracks`: crea el álbum con su portada, reclama al artista del CSV por nombre y enlaza `album_id`/`artist_id` sin pisar los datos históricos. Después encadena la imagen del artista |
+
+Las portadas de las canciones del fallback de Spotify ya vienen en `/v1/search`: no cuestan llamadas extra.
+
+**Ruta síncrona** (`CatalogEnricher.Resolve`, llamada desde `MusicService.enrichResults`):
+
+- Corre sobre el resultado final, sea local o de Spotify. La falta de imágenes no cambia la decisión de consultar el fallback.
+- Los jobs se deduplican por ID: 20 canciones del mismo artista generan una sola llamada. Corren en paralelo, como máximo **8 a la vez**.
+- El presupuesto total es `SEARCH_ENRICH_BUDGET` (**2 s**). Al vencer, la búsqueda responde con lo que haya; lo pendiente sale en `null` y pasa al worker.
+- Ante un 429 con `Retry-After` no se lanzan más llamadas en esa búsqueda.
+- Las escrituras en la BD posteriores a una respuesta de Spotify usan un contexto propio (5 s) para no perder una llamada ya hecha si el presupuesto vence justo después.
+- Un fallo del enriquecimiento nunca hace fallar la búsqueda.
+
+**Cuándo no se vuelve a llamar:**
+
+- un artista con `enriched_at`;
+- un artista o una canción con **5 errores** del proveedor (`enrich_attempts` / `link_attempts`, con backoff `30 s · 2^intentos`);
+- una canción que Spotify no encuentra (404): se agotan sus intentos de inmediato.
+
+Los cortes por presupuesto y los 429 no consumen intentos.
+
+**Worker de respaldo** (`catalog_enrichment_worker.go`):
+
+- Recibe lo que no terminó dentro del presupuesto. `Enqueue` no bloquea; la cola admite 5.000 jobs.
+- Reserva lotes de 20 con `ClaimArtistsForEnrichment` / `ClaimSongsForLinking`. Es un *lease* de 5 min, como el de §4.5, así que con varias réplicas cada ID lo consulta una sola. Lo que no se puede reservar se descarta: ya está enriquecido, sin intentos o en otra réplica.
+- Procesa **en serie**, con 250 ms entre llamadas, para no competir con las búsquedas por la cuota. Ante un 429 se pausa durante `Retry-After`; ante otro error, 1 min.
+- Trabaja bajo demanda: no relee la BD. Si un job se pierde (cola llena, reinicio), la próxima búsqueda que muestre la entidad lo vuelve a intentar.
+
+**Esquema** (`20261111000007_add_catalog_enrichment.sql`):
+
+- `artists`: `enriched_at`, `enrich_attempts` y `next_enrich_attempt_at`.
+- `song_metadata`: `link_attempts` y `next_link_attempt_at`.
+- Los `DEFAULT` constantes no reescriben las 1.16M filas.
+
+**Pruebas:**
+
+- `music_service_test.go`:
+  - la imagen del artista llega en la misma respuesta;
+  - una canción del CSV se enlaza y encadena a su artista;
+  - deduplicación;
+  - presupuesto vencido → `null` y worker;
+  - 429;
+  - artistas ya enriquecidos o sin intentos;
+  - búsqueda de artistas;
+  - 404 de una canción;
+  - imágenes del fallback.
+- `catalog_enrichment_worker_test.go`:
+  - solo se consulta lo reservado;
+  - encadenamiento;
+  - pausa por 429 sin consumir intentos;
+  - 404;
+  - error del proveedor;
+  - jobs ya procesados.
+- `spotify/client_test.go`:
+  - mapeo de `GetArtist`/`GetTrack`;
+  - 404/400 → `ErrNotFound`;
+  - `Retry-After`.
 
 ---
 

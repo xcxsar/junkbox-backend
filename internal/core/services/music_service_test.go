@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -85,8 +87,9 @@ func (f *fakeProvider) SearchAlbums(_ context.Context, _ string, _ int) ([]domai
 }
 
 // fakeImporter "persiste" las canciones asignándoles un id y las deja
-// pendientes de embedding.
+// pendientes de embedding. Las imágenes son las que llegan de Spotify.
 type fakeImporter struct {
+	mu       sync.Mutex
 	err      error
 	imported []domain.ImportedTrack
 }
@@ -95,12 +98,19 @@ func (f *fakeImporter) ImportTracks(_ context.Context, tracks []domain.ImportedT
 	if f.err != nil {
 		return nil, f.err
 	}
+	f.mu.Lock()
 	f.imported = append(f.imported, tracks...)
+	f.mu.Unlock()
 	out := make([]domain.ImportedSong, len(tracks))
 	for i, t := range tracks {
+		title := t.Album.Title
 		out[i] = domain.ImportedSong{
-			Track: domain.Track{ID: int32(1000 + i), SpotifyID: t.SpotifyID, TrackName: t.Name, ArtistName: t.Artist.Name, PendingEmbedding: true},
-			ISRC:  t.ISRC,
+			Track: domain.Track{
+				ID: int32(1000 + i), SpotifyID: t.SpotifyID, TrackName: t.Name, ArtistName: t.Artist.Name, PendingEmbedding: true,
+				AlbumTitle: &title, AlbumImageURL: t.Album.ImageURL, ArtistImageURL: t.Artist.ImageURL,
+			},
+			ISRC:            t.ISRC,
+			ArtistSpotifyID: t.Artist.SpotifyID,
 		}
 	}
 	return out, nil
@@ -114,9 +124,16 @@ func (f *fakeImporter) ImportAlbums(_ context.Context, _ []domain.ImportedAlbum)
 	return nil, f.err
 }
 
-type fakeQueue struct{ jobs []domain.EmbeddingJob }
+type fakeQueue struct {
+	mu   sync.Mutex
+	jobs []domain.EmbeddingJob
+}
 
-func (f *fakeQueue) Enqueue(jobs ...domain.EmbeddingJob) { f.jobs = append(f.jobs, jobs...) }
+func (f *fakeQueue) Enqueue(jobs ...domain.EmbeddingJob) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.jobs = append(f.jobs, jobs...)
+}
 
 func localTrack(name string, score float64) sqlc.SearchTracksTrigramRow {
 	return sqlc.SearchTracksTrigramRow{
@@ -144,22 +161,39 @@ type musicFixture struct {
 	provider *fakeProvider
 	importer *fakeImporter
 	queue    *fakeQueue
+	metadata *fakeMetadata
+	store    *fakeEnrichStore
+	fallback *fakeEnrichQueue
 	svc      *MusicService
 }
 
+// newMusicFixture arma el servicio. Con withProvider, Spotify respalda la
+// búsqueda y completa imágenes con un presupuesto de 500 ms.
 func newMusicFixture(withProvider bool) *musicFixture {
 	f := &musicFixture{
 		catalog:  &fakeCatalog{},
 		provider: &fakeProvider{tracks: []domain.ImportedTrack{spotifyTrack()}},
 		importer: &fakeImporter{},
 		queue:    &fakeQueue{},
+		metadata: newFakeMetadata(),
+		store:    newFakeEnrichStore(),
+		fallback: &fakeEnrichQueue{},
 	}
-	if withProvider {
-		f.svc = NewMusicService(f.catalog, f.importer, f.provider, f.queue, 0.8)
-	} else {
-		f.svc = NewMusicService(f.catalog, f.importer, nil, f.queue, 0.8)
-	}
+	f.build(withProvider, 500*time.Millisecond, 0)
 	return f
+}
+
+func (f *musicFixture) build(withProvider bool, budget time.Duration, concurrency int) {
+	if !withProvider {
+		f.svc = NewMusicService(f.catalog, f.importer, nil, f.queue, 0.8, SearchEnrichment{})
+		return
+	}
+	f.svc = NewMusicService(f.catalog, f.importer, f.provider, f.queue, 0.8, SearchEnrichment{
+		Enricher:    NewCatalogEnricher(f.metadata, f.store, f.importer, f.queue),
+		Fallback:    f.fallback,
+		Budget:      budget,
+		Concurrency: concurrency,
+	})
 }
 
 // --- búsqueda ---
@@ -305,6 +339,208 @@ func TestSearchValidaciones(t *testing.T) {
 				t.Fatalf("err = %v, se esperaba ValidationError", err)
 			}
 		})
+	}
+}
+
+// --- imágenes en la búsqueda (enriquecimiento síncrono) ---
+
+// linkedTrack es una canción con álbum cuyo artista tiene spotify_id pero
+// aún no tiene imagen.
+func linkedTrack(id int32, trackID, artistID string) sqlc.SearchTracksTrigramRow {
+	albumID := uuid.New()
+	r := localTrack("Espresso", 1.0)
+	r.ID = id
+	r.TrackID = sql.NullString{String: trackID, Valid: true}
+	r.AlbumID = &albumID
+	r.AlbumTitle = sql.NullString{String: "Short n' Sweet", Valid: true}
+	r.AlbumImageUrl = sql.NullString{String: "cover.jpg", Valid: true}
+	r.ArtistSpotifyID = sql.NullString{String: artistID, Valid: true}
+	return r
+}
+
+func TestSearchCompletaImagenDelArtistaEnLaMismaRespuesta(t *testing.T) {
+	f := newMusicFixture(true)
+	f.catalog.tracks = []sqlc.SearchTracksTrigramRow{linkedTrack(1, trackA, artistA)}
+	f.metadata.artists[artistA] = domain.ImportedArtist{SpotifyID: artistA, ImageURL: strp("artist.jpg")}
+
+	res, err := f.svc.Search(context.Background(), "Espresso", "track", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	tr := res.Results.([]domain.Track)[0]
+	if tr.AlbumImageURL == nil || *tr.AlbumImageURL != "cover.jpg" || tr.ArtistImageURL == nil || *tr.ArtistImageURL != "artist.jpg" {
+		t.Fatalf("imágenes inesperadas: album=%v artist=%v", tr.AlbumImageURL, tr.ArtistImageURL)
+	}
+	if f.store.enriched[artistA].String != "artist.jpg" {
+		t.Fatalf("debía guardar la imagen: %+v", f.store.enriched)
+	}
+	if len(f.fallback.jobs) != 0 || f.provider.calls != 0 {
+		t.Fatalf("nada debía quedar pendiente ni consultar la búsqueda de Spotify: jobs=%v calls=%d", f.fallback.jobs, f.provider.calls)
+	}
+}
+
+func TestSearchEnlazaCancionDelCSVEnLaMismaRespuesta(t *testing.T) {
+	f := newMusicFixture(true)
+	f.catalog.tracks = []sqlc.SearchTracksTrigramRow{localTrack("Grain", 1.0)} // sin álbum ni artista de Spotify
+	f.metadata.tracks[trackA] = domain.ImportedTrack{
+		SpotifyID: trackA, Name: "Grain",
+		Artist: domain.ImportedArtist{SpotifyID: artistB, Name: "Dan Telfer"},
+		Album:  domain.ImportedAlbum{Title: "Grain", ImageURL: strp("cover.jpg")},
+	}
+	f.metadata.artists[artistB] = domain.ImportedArtist{SpotifyID: artistB, ImageURL: strp("artist.jpg")}
+
+	res, err := f.svc.Search(context.Background(), "Grain", "track", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	tr := res.Results.([]domain.Track)[0]
+	if tr.AlbumImageURL == nil || *tr.AlbumImageURL != "cover.jpg" || tr.AlbumTitle == nil || *tr.AlbumTitle != "Grain" {
+		t.Fatalf("debía traer la portada del álbum enlazado: %+v", tr)
+	}
+	if tr.ArtistImageURL == nil || *tr.ArtistImageURL != "artist.jpg" {
+		t.Fatalf("debía encadenar la imagen del artista: %v", tr.ArtistImageURL)
+	}
+	if a, tc := f.metadata.calls(); a != 1 || tc != 1 {
+		t.Fatalf("llamadas = artistas %d, canciones %d", a, tc)
+	}
+}
+
+func TestSearchDeduplicaArtistas(t *testing.T) {
+	f := newMusicFixture(true)
+	ids := []string{"0000000000000000000001", "0000000000000000000002", "0000000000000000000003", "0000000000000000000004", "0000000000000000000005"}
+	for i, id := range ids {
+		f.catalog.tracks = append(f.catalog.tracks, linkedTrack(int32(i+1), id, artistA))
+	}
+	f.metadata.artists[artistA] = domain.ImportedArtist{SpotifyID: artistA, ImageURL: strp("artist.jpg")}
+
+	res, err := f.svc.Search(context.Background(), "Espresso", "track", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if f.metadata.artistCalls[artistA] != 1 {
+		t.Fatalf("calls = %d, se esperaba 1", f.metadata.artistCalls[artistA])
+	}
+	for _, tr := range res.Results.([]domain.Track) {
+		if tr.ArtistImageURL == nil || *tr.ArtistImageURL != "artist.jpg" {
+			t.Fatalf("todas las canciones debían recibir la imagen: %+v", tr)
+		}
+	}
+}
+
+func TestSearchRespetaElPresupuestoYDelegaAlWorker(t *testing.T) {
+	f := newMusicFixture(true)
+	f.build(true, 50*time.Millisecond, 0)
+	f.catalog.tracks = []sqlc.SearchTracksTrigramRow{linkedTrack(1, trackA, artistA)}
+	f.metadata.artists[artistA] = domain.ImportedArtist{SpotifyID: artistA, ImageURL: strp("artist.jpg")}
+	f.metadata.delay = time.Second
+
+	start := time.Now()
+	res, err := f.svc.Search(context.Background(), "Espresso", "track", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("la búsqueda tardó %s; el presupuesto es 50ms", elapsed)
+	}
+	if tr := res.Results.([]domain.Track)[0]; tr.ArtistImageURL != nil {
+		t.Fatalf("no debía alcanzar a traer la imagen: %v", *tr.ArtistImageURL)
+	}
+	want := domain.EnrichmentJob{Kind: domain.EnrichArtist, SpotifyID: artistA}
+	if len(f.fallback.jobs) != 1 || f.fallback.jobs[0] != want {
+		t.Fatalf("debía delegar al worker: %+v", f.fallback.jobs)
+	}
+	if len(f.store.artistFails) != 0 {
+		t.Fatalf("el corte por presupuesto no debe consumir intentos: %v", f.store.artistFails)
+	}
+}
+
+func TestSearchSeDetieneAnteRateLimit(t *testing.T) {
+	f := newMusicFixture(true)
+	f.build(true, time.Second, 1)
+	f.catalog.tracks = []sqlc.SearchTracksTrigramRow{
+		linkedTrack(1, "0000000000000000000001", artistA),
+		linkedTrack(2, "0000000000000000000002", artistB),
+		linkedTrack(3, "0000000000000000000003", artistC),
+	}
+	f.metadata.err = rateLimitErr{wait: 30 * time.Second}
+
+	if _, err := f.svc.Search(context.Background(), "Espresso", "track", 0); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if a, _ := f.metadata.calls(); a != 1 {
+		t.Fatalf("debía detenerse tras el primer 429 (calls=%d)", a)
+	}
+	if len(f.fallback.jobs) != 3 {
+		t.Fatalf("los tres artistas debían quedar para el worker: %+v", f.fallback.jobs)
+	}
+}
+
+func TestSearchNoConsultaArtistasYaEnriquecidos(t *testing.T) {
+	f := newMusicFixture(true)
+	enriched := linkedTrack(1, trackA, artistA)
+	enriched.ArtistEnriched = true // Spotify no tiene imagen para él
+	exhausted := linkedTrack(2, "0000000000000000000002", artistB)
+	exhausted.ArtistEnrichAttempts = MaxEnrichAttempts
+	f.catalog.tracks = []sqlc.SearchTracksTrigramRow{enriched, exhausted}
+
+	if _, err := f.svc.Search(context.Background(), "Espresso", "track", 0); err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if a, tc := f.metadata.calls(); a != 0 || tc != 0 {
+		t.Fatalf("no debía llamar a Spotify (artistas %d, canciones %d)", a, tc)
+	}
+}
+
+func TestSearchCompletaImagenDeArtistasLocales(t *testing.T) {
+	f := newMusicFixture(true)
+	f.catalog.artists = []sqlc.SearchArtistsTrigramRow{{
+		ID: uuid.New(), Name: "Sabrina Carpenter", Score: 1.0,
+		SpotifyID: sql.NullString{String: artistA, Valid: true},
+	}}
+	f.metadata.artists[artistA] = domain.ImportedArtist{SpotifyID: artistA, ImageURL: strp("artist.jpg")}
+
+	res, err := f.svc.Search(context.Background(), "Sabrina Carpenter", "artist", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if a := res.Results.([]domain.Artist)[0]; a.ImageURL == nil || *a.ImageURL != "artist.jpg" {
+		t.Fatalf("debía traer la imagen: %+v", a)
+	}
+}
+
+func TestSearchCancionInexistenteEnSpotifyNoVaAlWorker(t *testing.T) {
+	f := newMusicFixture(true)
+	f.catalog.tracks = []sqlc.SearchTracksTrigramRow{localTrack("Grain", 1.0)}
+
+	res, err := f.svc.Search(context.Background(), "Grain", "track", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if tr := res.Results.([]domain.Track)[0]; tr.AlbumImageURL != nil {
+		t.Fatalf("no hay portada: %v", *tr.AlbumImageURL)
+	}
+	if len(f.store.songFails) != 1 || !f.store.songFails[0].GiveUp {
+		t.Fatalf("debía rendirse con la canción: %+v", f.store.songFails)
+	}
+	if len(f.fallback.jobs) != 0 {
+		t.Fatalf("no debía delegar al worker: %+v", f.fallback.jobs)
+	}
+}
+
+func TestSearchSpotifyFallbackTraeImagenes(t *testing.T) {
+	f := newMusicFixture(true)
+	track := spotifyTrack()
+	track.Album = domain.ImportedAlbum{Title: "Short n' Sweet", ImageURL: strp("cover.jpg")}
+	f.provider.tracks = []domain.ImportedTrack{track}
+	f.metadata.artists[track.Artist.SpotifyID] = domain.ImportedArtist{SpotifyID: track.Artist.SpotifyID, ImageURL: strp("artist.jpg")}
+
+	res, err := f.svc.Search(context.Background(), "Espresso Sabrina Carpenter", "track", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	tr := res.Results.([]domain.Track)[0]
+	if res.Source != domain.SourceSpotifyFallback || tr.AlbumImageURL == nil || *tr.AlbumImageURL != "cover.jpg" || tr.ArtistImageURL == nil || *tr.ArtistImageURL != "artist.jpg" {
+		t.Fatalf("resultado inesperado: source=%s track=%+v", res.Source, tr)
 	}
 }
 

@@ -9,15 +9,20 @@ import (
 	"strconv"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/xcxsar/junkbox-backend/internal/core/domain"
 )
 
 // fakeSpotify simula accounts.spotify.com y api.spotify.com en un solo
-// servidor. search responde a /v1/search.
+// servidor. search responde a /v1/search y lookup a /v1/artists/{id} y
+// /v1/tracks/{id}.
 type fakeSpotify struct {
 	tokenCalls  atomic.Int32
 	searchCalls atomic.Int32
 	expiresIn   int
 	search      func(w http.ResponseWriter, r *http.Request)
+	lookup      func(w http.ResponseWriter, r *http.Request)
 }
 
 func (f *fakeSpotify) start(t *testing.T) *Client {
@@ -37,6 +42,8 @@ func (f *fakeSpotify) start(t *testing.T) *Client {
 		f.searchCalls.Add(1)
 		f.search(w, r)
 	})
+	mux.HandleFunc("GET /v1/artists/{id}", func(w http.ResponseWriter, r *http.Request) { f.lookup(w, r) })
+	mux.HandleFunc("GET /v1/tracks/{id}", func(w http.ResponseWriter, r *http.Request) { f.lookup(w, r) })
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return New(Config{ClientID: "client", ClientSecret: "secret", AccountsURL: srv.URL, APIURL: srv.URL})
@@ -205,5 +212,74 @@ func TestCredencialesInvalidas(t *testing.T) {
 
 	if _, err := c.SearchTracks(context.Background(), "x", 5); err == nil {
 		t.Fatal("se esperaba error con credenciales inválidas")
+	}
+}
+
+func TestGetArtistMapeaImagenYGeneros(t *testing.T) {
+	f := &fakeSpotify{expiresIn: 3600}
+	f.lookup = func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/artists/74KM79TiuVKeVCqs8QtB0B" {
+			t.Errorf("ruta inesperada: %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"id":"74KM79TiuVKeVCqs8QtB0B","name":"Sabrina Carpenter","genres":["pop"],
+			"images":[{"url":"small","width":160},{"url":"big","width":640}]}`))
+	}
+	c := f.start(t)
+
+	a, err := c.GetArtist(context.Background(), "74KM79TiuVKeVCqs8QtB0B")
+	if err != nil {
+		t.Fatalf("GetArtist: %v", err)
+	}
+	if a.SpotifyID != "74KM79TiuVKeVCqs8QtB0B" || a.ImageURL == nil || *a.ImageURL != "big" || len(a.Genres) != 1 || a.Popularity != nil {
+		t.Fatalf("artista mal mapeado: %+v", a)
+	}
+}
+
+func TestGetTrackMapeaAlbumConPortada(t *testing.T) {
+	f := &fakeSpotify{expiresIn: 3600}
+	f.lookup = func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(trackJSON))
+	}
+	c := f.start(t)
+
+	tr, err := c.GetTrack(context.Background(), "2qSkXiYOKEzfk3vhRpIQUR")
+	if err != nil {
+		t.Fatalf("GetTrack: %v", err)
+	}
+	if tr.SpotifyID != "2qSkXiYOKEzfk3vhRpIQUR" || tr.Album.ImageURL == nil || *tr.Album.ImageURL != "big" || tr.Artist.SpotifyID != "74KM79TiuVKeVCqs8QtB0B" {
+		t.Fatalf("canción mal mapeada: %+v", tr)
+	}
+}
+
+func TestGetArtistYGetTrackInexistentesDevuelvenErrNotFound(t *testing.T) {
+	for _, status := range []int{http.StatusNotFound, http.StatusBadRequest} {
+		f := &fakeSpotify{expiresIn: 3600}
+		f.lookup = func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"error":{"status":404,"message":"Resource not found"}}`))
+		}
+		c := f.start(t)
+
+		if _, err := c.GetArtist(context.Background(), "74KM79TiuVKeVCqs8QtB0B"); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("HTTP %d: GetArtist err = %v, se esperaba ErrNotFound", status, err)
+		}
+		if _, err := c.GetTrack(context.Background(), "2qSkXiYOKEzfk3vhRpIQUR"); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("HTTP %d: GetTrack err = %v, se esperaba ErrNotFound", status, err)
+		}
+	}
+}
+
+func TestGetArtist429ConservaRetryAfter(t *testing.T) {
+	f := &fakeSpotify{expiresIn: 3600}
+	f.lookup = func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Retry-After", "3600")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}
+	c := f.start(t)
+
+	_, err := c.GetArtist(context.Background(), "74KM79TiuVKeVCqs8QtB0B")
+	var ra interface{ RetryAfter() time.Duration }
+	if !errors.As(err, &ra) || ra.RetryAfter() != time.Hour {
+		t.Fatalf("err = %v, se esperaba un error con Retry-After", err)
 	}
 }

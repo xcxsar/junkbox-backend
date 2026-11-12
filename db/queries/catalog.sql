@@ -10,15 +10,24 @@
 -- Sabrina Carpenter" (0.67). similarity() desempata a favor del texto más
 -- parecido en total (el título exacto antes que uno que solo lo contiene).
 
+-- album_id, link_attempts y los campos artist_* (salvo la imagen) no se
+-- exponen: el servicio los usa para decidir qué completar con Spotify.
 -- name: SearchTracksTrigram :many
 SELECT
     s.id, s.track_id, s.track_name, s.artist_name, s.year, s.genre,
     s.popularity, s.duration_ms, s.pending_embedding,
     (s.embedding IS NOT NULL)::bool AS has_embedding,
     al.title AS album_title,
+    al.image_url AS album_image_url,
+    ar.image_url AS artist_image_url,
+    ar.spotify_id AS artist_spotify_id,
+    (ar.enriched_at IS NOT NULL)::bool AS artist_enriched,
+    coalesce(ar.enrich_attempts, 0)::int AS artist_enrich_attempts,
+    s.album_id, s.link_attempts,
     strict_word_similarity(sqlc.arg(query)::text, coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, ''))::float8 AS score
 FROM song_metadata s
 LEFT JOIN albums al ON al.id = s.album_id
+LEFT JOIN artists ar ON ar.id = s.artist_id
 WHERE sqlc.arg(query)::text <<% (coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, ''))
 ORDER BY score DESC,
     similarity(sqlc.arg(query)::text, coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, '')) DESC,
@@ -28,6 +37,7 @@ LIMIT sqlc.arg(max_results);
 -- name: SearchArtistsTrigram :many
 SELECT
     id, spotify_id, name, genres, popularity, image_url, created_at,
+    (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts,
     strict_word_similarity(sqlc.arg(query)::text, name)::float8 AS score
 FROM artists
 WHERE sqlc.arg(query)::text <<% name
@@ -56,9 +66,12 @@ SELECT
     s.time_signature, s.pending_embedding,
     (s.embedding IS NOT NULL)::bool AS has_embedding,
     al.title AS album_title,
+    al.image_url AS album_image_url,
+    ar.image_url AS artist_image_url,
     s.ratings_count, s.avg_rating
 FROM song_metadata s
 LEFT JOIN albums al ON al.id = s.album_id
+LEFT JOIN artists ar ON ar.id = s.artist_id
 WHERE s.id = sqlc.arg(id)::int OR s.track_id = sqlc.arg(spotify_id)::text
 LIMIT 1;
 
@@ -79,12 +92,14 @@ LIMIT 1;
 
 -- name: ListTracksByAlbum :many
 SELECT
-    id, track_id, track_name, artist_name, year, genre, popularity,
-    duration_ms, pending_embedding,
-    (embedding IS NOT NULL)::bool AS has_embedding
-FROM song_metadata
-WHERE album_id = $1
-ORDER BY id;
+    s.id, s.track_id, s.track_name, s.artist_name, s.year, s.genre,
+    s.popularity, s.duration_ms, s.pending_embedding,
+    (s.embedding IS NOT NULL)::bool AS has_embedding,
+    ar.image_url AS artist_image_url
+FROM song_metadata s
+LEFT JOIN artists ar ON ar.id = s.artist_id
+WHERE s.album_id = $1
+ORDER BY s.id;
 
 -- --- Importación desde Spotify (CatalogImporter, dentro de una transacción) ---
 
@@ -106,7 +121,7 @@ WHERE id = (
     LIMIT 1
     FOR UPDATE SKIP LOCKED
 )
-RETURNING id;
+RETURNING id, image_url, (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts;
 
 -- Los artistas simplificados de una búsqueda de canciones no traen géneros,
 -- popularidad ni imagen: en conflicto no se pisan los valores conocidos.
@@ -118,7 +133,7 @@ ON CONFLICT (spotify_id) DO UPDATE SET
     genres = CASE WHEN cardinality(EXCLUDED.genres) > 0 THEN EXCLUDED.genres ELSE artists.genres END,
     popularity = coalesce(EXCLUDED.popularity, artists.popularity),
     image_url = coalesce(EXCLUDED.image_url, artists.image_url)
-RETURNING id;
+RETURNING id, image_url, (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts;
 
 -- name: UpsertAlbum :one
 INSERT INTO albums (
@@ -134,7 +149,7 @@ ON CONFLICT (spotify_id) DO UPDATE SET
     album_type = EXCLUDED.album_type,
     image_url = coalesce(EXCLUDED.image_url, albums.image_url),
     total_tracks = EXCLUDED.total_tracks
-RETURNING id;
+RETURNING id, image_url;
 
 -- Una canción del CSV que ya tiene embedding conserva sus datos históricos;
 -- solo se completan los enlaces y el ISRC. pending_embedding queda TRUE solo
@@ -160,6 +175,56 @@ RETURNING
     id, track_id, track_name, artist_name, year, genre, popularity, duration_ms,
     isrc, embedding_attempts, pending_embedding,
     (embedding IS NOT NULL)::bool AS has_embedding;
+
+-- --- Enriquecimiento con Spotify (imágenes de artistas y enlace de canciones del CSV) ---
+
+-- UpdateArtistEnrichment guarda lo que devolvió GET /v1/artists/{id} y marca
+-- al artista como consultado aunque Spotify no tenga imagen.
+-- name: UpdateArtistEnrichment :one
+UPDATE artists
+SET genres = CASE WHEN cardinality(sqlc.arg(genres)::text[]) > 0 THEN sqlc.arg(genres)::text[] ELSE genres END,
+    popularity = coalesce(sqlc.narg(popularity), popularity),
+    image_url = coalesce(sqlc.narg(image_url), image_url),
+    enriched_at = NOW(),
+    next_enrich_attempt_at = NULL
+WHERE spotify_id = sqlc.arg(spotify_id)
+RETURNING image_url;
+
+-- Backoff exponencial: retry_base_seconds · 2^intentos.
+-- name: MarkArtistEnrichmentFailed :exec
+UPDATE artists
+SET enrich_attempts = enrich_attempts + 1,
+    next_enrich_attempt_at = NOW() + make_interval(secs => sqlc.arg(retry_base_seconds)::float8 * power(2, least(enrich_attempts, 10)))
+WHERE spotify_id = sqlc.arg(spotify_id) AND enriched_at IS NULL;
+
+-- give_up (la canción ya no existe en Spotify) agota los intentos.
+-- name: MarkSongLinkFailed :exec
+UPDATE song_metadata
+SET link_attempts = CASE WHEN sqlc.arg(give_up)::bool THEN greatest(link_attempts, sqlc.arg(max_attempts)::int) ELSE link_attempts + 1 END,
+    next_link_attempt_at = NOW() + make_interval(secs => sqlc.arg(retry_base_seconds)::float8 * power(2, least(link_attempts, 10)))
+WHERE track_id = sqlc.arg(track_id) AND album_id IS NULL;
+
+-- Los claims los usa solo el worker de respaldo: reservan con un lease los
+-- pendientes cuyo reintento ya venció, para que otra réplica no los consulte
+-- a la vez. La búsqueda síncrona no reserva (su presupuesto es corto).
+-- name: ClaimArtistsForEnrichment :many
+UPDATE artists
+SET next_enrich_attempt_at = NOW() + make_interval(secs => sqlc.arg(lease_seconds)::float8)
+WHERE spotify_id = ANY(sqlc.arg(spotify_ids)::text[])
+  AND image_url IS NULL
+  AND enriched_at IS NULL
+  AND enrich_attempts < sqlc.arg(max_attempts)::int
+  AND (next_enrich_attempt_at IS NULL OR next_enrich_attempt_at <= NOW())
+RETURNING spotify_id;
+
+-- name: ClaimSongsForLinking :many
+UPDATE song_metadata
+SET next_link_attempt_at = NOW() + make_interval(secs => sqlc.arg(lease_seconds)::float8)
+WHERE track_id = ANY(sqlc.arg(track_ids)::text[])
+  AND album_id IS NULL
+  AND link_attempts < sqlc.arg(max_attempts)::int
+  AND (next_link_attempt_at IS NULL OR next_link_attempt_at <= NOW())
+RETURNING track_id;
 
 -- --- Worker de embeddings ---
 

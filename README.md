@@ -135,6 +135,7 @@ cp .env.template .env
 - `SPOTIFY_CLIENT_ID` / `SPOTIFY_CLIENT_SECRET` (opcionales; se definen las dos o ninguna): credenciales de la app en el [Spotify Developer Dashboard](https://developer.spotify.com/dashboard), usadas con el flujo OAuth2 Client Credentials. Sin ellas, la búsqueda solo consulta el catálogo local.
 - `FREQBLOG_API_KEY` (opcional): clave de [FreqBlog](https://freqblog.com), de donde salen los audio features de las canciones importadas desde Spotify. Spotify cerró `/v1/audio-features` para apps nuevas en noviembre de 2024. Sin la clave, esas canciones quedan sin embedding (`pending_embedding: true`). El plan gratuito incluye 1.000 canciones resueltas al mes.
 - `SEARCH_FALLBACK_THRESHOLD` (opcional, por defecto `0.8`): puntaje mínimo (`strict_word_similarity`, de 0 a 1) del mejor resultado local para no consultar Spotify.
+- `SEARCH_ENRICH_BUDGET` (opcional, por defecto `2s`): cuánto espera la búsqueda a Spotify para completar las imágenes de artista y las portadas que faltan. Lo que no termina a tiempo lo completa un worker en segundo plano.
 - `CORS_ALLOWED_ORIGINS` (opcional, por defecto `http://localhost:5173`): orígenes del frontend, separados por coma, que pueden llamar a la API desde el navegador. Cada uno debe ser `http(s)://host[:puerto]` exacto, sin `/` final ni comodines; cualquier otro origen se rechaza.
 - `FRONTEND_URL` (opcional, por defecto el primer origen de `CORS_ALLOWED_ORIGINS`): origen del frontend al que apuntan los enlaces de los correos (`/restablecer-contrasena#token=…` y `/verificar-correo#token=…`).
 - `PASSWORD_RESET_TTL` / `EMAIL_VERIFICATION_TTL` (opcionales, por defecto `30m` y `24h`): vigencia de los enlaces de recuperación y de verificación.
@@ -691,6 +692,12 @@ Consulta a Spotify si no hay resultados locales o si el mejor puntaje es menor q
 
 Si Spotify falla o no está configurado, responde los resultados locales que haya.
 
+Cada canción trae `album_image_url` (portada) y `artist_image_url`, y cada artista su `image_url`. Si faltan en el catálogo, la búsqueda las pide a Spotify antes de responder, en paralelo y con un tope de `SEARCH_ENRICH_BUDGET` (2 s):
+- los artistas que llegaron "simplificados" (sin imagen) se completan con `GET /v1/artists/{id}`;
+- las canciones del CSV, que no tienen álbum, se enlazan con `GET /v1/tracks/{id}`. Eso trae la portada y reclama a su artista.
+
+Spotify eliminó los endpoints por lotes para las apps en Development Mode, así que es una llamada por artista o canción. Solo ocurre la primera vez: el resultado queda guardado. Lo que no alcanza a resolverse dentro del presupuesto sale en `null` y lo completa un worker en segundo plano para la siguiente búsqueda.
+
 Las consultas de título y/o artista responden en 15–250 ms. Una sola palabra muy común ("love", "the") puede tardar 1–3 s; la limitación y sus alternativas están en [`implementacion.md` §4.1](implementacion.md#41-arquitectura-del-flujo-de-búsqueda-y-fallback-cache-through).
 
 **Parámetros de consulta (Query params):**
@@ -717,6 +724,9 @@ curl -i -X GET "http://localhost:8080/api/v1/music/search?q=Grain%20Dan%20Telfer
       "spotify_id": "1TIHAkrLbRALyt4O4Oh28i",
       "track_name": "Grain",
       "artist_name": "Dan Telfer",
+      "album_title": "Fiddling As Mammoths Burn",
+      "album_image_url": "https://i.scdn.co/image/ab67616d0000b273...",
+      "artist_image_url": "https://i.scdn.co/image/ab6761610000e5eb...",
       "year": 2012,
       "genre": "comedy",
       "popularity": 5,
@@ -750,6 +760,8 @@ curl -i -X GET "http://localhost:8080/api/v1/music/search?q=Espresso%20Sabrina%2
       "track_name": "Espresso",
       "artist_name": "Sabrina Carpenter",
       "album_title": "Short n' Sweet",
+      "album_image_url": "https://i.scdn.co/image/ab67616d0000b273...",
+      "artist_image_url": "https://i.scdn.co/image/ab6761610000e5eb...",
       "year": 2024,
       "genre": null,
       "popularity": null,

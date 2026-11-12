@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -27,10 +28,27 @@ const (
 	// del mejor resultado local para no consultar Spotify. Con 0.8, a una
 	// consulta de tres palabras no le puede faltar ninguna.
 	DefaultFallbackThreshold = 0.8
+	// DefaultEnrichBudget es el tiempo máximo que la búsqueda espera a
+	// Spotify para completar imágenes que faltan.
+	DefaultEnrichBudget = 2 * time.Second
+	// DefaultEnrichConcurrency es cuántas llamadas de enriquecimiento corren
+	// a la vez por búsqueda.
+	DefaultEnrichConcurrency = 8
 )
 
 // spotifyIDPattern: los IDs de Spotify son base62 de 22 caracteres.
 var spotifyIDPattern = regexp.MustCompile(`^[0-9A-Za-z]{22}$`)
+
+// SearchEnrichment configura cómo la búsqueda completa con Spotify las
+// imágenes que faltan antes de responder. Con Enricher nil no se completa
+// nada. Fallback recibe lo que no terminó dentro de Budget (puede ser nil).
+// Los valores en cero usan los defaults.
+type SearchEnrichment struct {
+	Enricher    *CatalogEnricher
+	Fallback    ports.EnrichmentQueue
+	Budget      time.Duration
+	Concurrency int
+}
 
 // MusicService implementa la búsqueda cache-through (catálogo local con
 // respaldo en Spotify) y el detalle de canciones, artistas y álbumes.
@@ -40,28 +58,41 @@ type MusicService struct {
 	provider  ports.MusicProvider  // nil: búsqueda solo local
 	queue     ports.EmbeddingQueue // nil: no se encolan embeddings
 	threshold float64
+	enrich    SearchEnrichment
 }
 
 // NewMusicService crea el servicio. provider y queue pueden ser nil (sin
 // credenciales de Spotify o de FreqBlog). threshold <= 0 usa el default.
-func NewMusicService(catalog ports.CatalogStore, importer ports.CatalogImporter, provider ports.MusicProvider, queue ports.EmbeddingQueue, threshold float64) *MusicService {
+func NewMusicService(catalog ports.CatalogStore, importer ports.CatalogImporter, provider ports.MusicProvider, queue ports.EmbeddingQueue, threshold float64, enrich SearchEnrichment) *MusicService {
 	if threshold <= 0 {
 		threshold = DefaultFallbackThreshold
 	}
-	return &MusicService{catalog: catalog, importer: importer, provider: provider, queue: queue, threshold: threshold}
+	if enrich.Budget <= 0 {
+		enrich.Budget = DefaultEnrichBudget
+	}
+	if enrich.Concurrency <= 0 {
+		enrich.Concurrency = DefaultEnrichConcurrency
+	}
+	return &MusicService{catalog: catalog, importer: importer, provider: provider, queue: queue, threshold: threshold, enrich: enrich}
 }
 
 // localResults es el resultado de una búsqueda local de cualquier tipo.
+// jobs es lo que falta pedir a Spotify para completar las imágenes y
+// trackArtists el spotify_id del artista de cada canción ("" si no se
+// conoce); ninguno de los dos se expone en la respuesta.
 type localResults struct {
-	results any
-	count   int
-	best    float64 // puntaje del mejor resultado (0 si no hay)
+	results      any
+	count        int
+	best         float64 // puntaje del mejor resultado (0 si no hay)
+	jobs         []domain.EnrichmentJob
+	trackArtists []string
 }
 
 // Search busca primero en el catálogo local y consulta Spotify si no hay
 // resultados o si el mejor puntaje no alcanza el umbral. Lo que devuelve
 // Spotify se persiste y las canciones nuevas se encolan para embedding.
-// limit = 0 usa DefaultSearchLimit.
+// Antes de responder completa con Spotify las imágenes que faltan (ver
+// enrichResults). limit = 0 usa DefaultSearchLimit.
 func (s *MusicService) Search(ctx context.Context, query, searchType string, limit int) (*domain.SearchResult, error) {
 	query = strings.TrimSpace(query)
 	if query == "" {
@@ -87,25 +118,66 @@ func (s *MusicService) Search(ctx context.Context, query, searchType string, lim
 	if err != nil {
 		return nil, err
 	}
-	result := &domain.SearchResult{Source: domain.SourceLocalCache, Query: query, Type: searchType, Count: local.count, Results: local.results}
+	final, source := local, domain.SourceLocalCache
 
-	if (local.count > 0 && local.best >= s.threshold) || s.provider == nil {
-		return result, nil
-	}
-
-	remote, err := s.searchRemote(ctx, query, searchType, limit)
-	if err != nil {
-		if local.count > 0 {
+	if (local.count == 0 || local.best < s.threshold) && s.provider != nil {
+		remote, err := s.searchRemote(ctx, query, searchType, limit)
+		switch {
+		case err != nil && local.count > 0:
 			log.Printf("búsqueda en Spotify falló, se responden resultados locales: %v", err)
-			return result, nil
+		case err != nil:
+			log.Printf("búsqueda en Spotify falló: %v", err)
+			return nil, domain.ErrMusicProviderUnavailable
+		case remote.count == 0 && local.count > 0:
+		default:
+			final, source = remote, domain.SourceSpotifyFallback
 		}
-		log.Printf("búsqueda en Spotify falló: %v", err)
-		return nil, domain.ErrMusicProviderUnavailable
 	}
-	if remote.count == 0 && local.count > 0 {
-		return result, nil
+
+	s.enrichResults(ctx, &final)
+	return &domain.SearchResult{Source: source, Query: query, Type: searchType, Count: final.count, Results: final.results}, nil
+}
+
+// enrichResults pide a Spotify, en paralelo y dentro del presupuesto, las
+// imágenes de artista y los álbumes (portadas) que faltan en los
+// resultados, y los aplica. Lo que no termina a tiempo sale en null y pasa
+// al worker de respaldo. Nunca hace fallar la búsqueda.
+func (s *MusicService) enrichResults(ctx context.Context, r *localResults) {
+	if s.enrich.Enricher == nil || len(r.jobs) == 0 {
+		return
 	}
-	return &domain.SearchResult{Source: domain.SourceSpotifyFallback, Query: query, Type: searchType, Count: remote.count, Results: remote.results}, nil
+	got, left := s.enrich.Enricher.Resolve(ctx, r.jobs, s.enrich.Budget, s.enrich.Concurrency)
+	if len(left) > 0 && s.enrich.Fallback != nil {
+		s.enrich.Fallback.Enqueue(left...)
+	}
+
+	switch results := r.results.(type) {
+	case []domain.Track:
+		for i := range results {
+			t := &results[i]
+			artistID := r.trackArtists[i]
+			if song, ok := got.songs[t.SpotifyID]; ok {
+				if t.AlbumTitle == nil {
+					t.AlbumTitle = song.AlbumTitle
+				}
+				t.AlbumImageURL = song.AlbumImageURL
+				if song.ArtistImageURL != nil {
+					t.ArtistImageURL = song.ArtistImageURL
+				}
+				artistID = song.ArtistSpotifyID
+			}
+			if t.ArtistImageURL == nil {
+				t.ArtistImageURL = got.artistImages[artistID]
+			}
+		}
+	case []domain.Artist:
+		for i := range results {
+			a := &results[i]
+			if a.ImageURL == nil && a.SpotifyID != nil {
+				a.ImageURL = got.artistImages[*a.SpotifyID]
+			}
+		}
+	}
 }
 
 func (s *MusicService) searchLocal(ctx context.Context, query, searchType string, limit int) (localResults, error) {
@@ -116,10 +188,14 @@ func (s *MusicService) searchLocal(ctx context.Context, query, searchType string
 			return localResults{}, fmt.Errorf("music: buscar artistas: %w", err)
 		}
 		out := make([]domain.Artist, len(rows))
+		var jobs []domain.EnrichmentJob
 		for i, r := range rows {
 			out[i] = artistFromRow(sqlc.GetArtistRow{ID: r.ID, SpotifyID: r.SpotifyID, Name: r.Name, Genres: r.Genres, Popularity: r.Popularity, ImageUrl: r.ImageUrl, CreatedAt: r.CreatedAt})
+			if !r.ImageUrl.Valid && artistEnrichable(r.SpotifyID.String, r.Enriched, r.EnrichAttempts) {
+				jobs = append(jobs, domain.EnrichmentJob{Kind: domain.EnrichArtist, SpotifyID: r.SpotifyID.String})
+			}
 		}
-		return localResults{results: out, count: len(out), best: bestScore(len(rows), func(i int) float64 { return rows[i].Score })}, nil
+		return localResults{results: out, count: len(out), best: bestScore(len(rows), func(i int) float64 { return rows[i].Score }), jobs: jobs}, nil
 	case domain.SearchTypeAlbum:
 		rows, err := s.catalog.SearchAlbumsTrigram(ctx, sqlc.SearchAlbumsTrigramParams{Query: query, MaxResults: int32(limit)})
 		if err != nil {
@@ -136,6 +212,8 @@ func (s *MusicService) searchLocal(ctx context.Context, query, searchType string
 			return localResults{}, fmt.Errorf("music: buscar canciones: %w", err)
 		}
 		out := make([]domain.Track, len(rows))
+		artists := make([]string, len(rows))
+		var jobs []domain.EnrichmentJob
 		for i, r := range rows {
 			out[i] = domain.Track{
 				ID:               r.ID,
@@ -143,6 +221,8 @@ func (s *MusicService) searchLocal(ctx context.Context, query, searchType string
 				TrackName:        r.TrackName.String,
 				ArtistName:       r.ArtistName.String,
 				AlbumTitle:       stringPtr(r.AlbumTitle),
+				AlbumImageURL:    stringPtr(r.AlbumImageUrl),
+				ArtistImageURL:   stringPtr(r.ArtistImageUrl),
 				Year:             int32Ptr(r.Year),
 				Genre:            stringPtr(r.Genre),
 				Popularity:       int32Ptr(r.Popularity),
@@ -150,8 +230,17 @@ func (s *MusicService) searchLocal(ctx context.Context, query, searchType string
 				HasEmbedding:     r.HasEmbedding,
 				PendingEmbedding: r.PendingEmbedding,
 			}
+			artists[i] = r.ArtistSpotifyID.String
+			// Las canciones del CSV no tienen álbum: enlazarlas trae la
+			// portada y reclama a su artista.
+			if r.AlbumID == nil && spotifyIDPattern.MatchString(r.TrackID.String) && r.LinkAttempts < MaxEnrichAttempts {
+				jobs = append(jobs, domain.EnrichmentJob{Kind: domain.EnrichTrack, SpotifyID: r.TrackID.String})
+			}
+			if !r.ArtistImageUrl.Valid && artistEnrichable(r.ArtistSpotifyID.String, r.ArtistEnriched, r.ArtistEnrichAttempts) {
+				jobs = append(jobs, domain.EnrichmentJob{Kind: domain.EnrichArtist, SpotifyID: r.ArtistSpotifyID.String})
+			}
 		}
-		return localResults{results: out, count: len(out), best: bestScore(len(rows), func(i int) float64 { return rows[i].Score })}, nil
+		return localResults{results: out, count: len(out), best: bestScore(len(rows), func(i int) float64 { return rows[i].Score }), jobs: jobs, trackArtists: artists}, nil
 	}
 }
 
@@ -187,21 +276,24 @@ func (s *MusicService) searchRemote(ctx context.Context, query, searchType strin
 			return localResults{}, err
 		}
 		out := make([]domain.Track, len(saved))
+		artists := make([]string, len(saved))
 		var jobs []domain.EmbeddingJob
+		var enrich []domain.EnrichmentJob
 		for i, song := range saved {
 			out[i] = song.Track
+			artists[i] = song.ArtistSpotifyID
 			if song.PendingEmbedding {
-				job := domain.EmbeddingJob{TrackID: song.SpotifyID, Attempts: song.EmbeddingAttempts}
-				if song.ISRC != nil {
-					job.ISRC = *song.ISRC
-				}
-				jobs = append(jobs, job)
+				jobs = append(jobs, embeddingJob(song))
+			}
+			// El artista de una canción llega simplificado, sin imagen.
+			if song.ArtistImageURL == nil && artistEnrichable(song.ArtistSpotifyID, song.ArtistEnriched, song.ArtistEnrichAttempts) {
+				enrich = append(enrich, domain.EnrichmentJob{Kind: domain.EnrichArtist, SpotifyID: song.ArtistSpotifyID})
 			}
 		}
 		if s.queue != nil && len(jobs) > 0 {
 			s.queue.Enqueue(jobs...)
 		}
-		return localResults{results: out, count: len(out)}, nil
+		return localResults{results: out, count: len(out), jobs: enrich, trackArtists: artists}, nil
 	}
 }
 
@@ -223,6 +315,8 @@ func (s *MusicService) GetTrack(ctx context.Context, id string) (*domain.TrackDe
 			TrackName:        r.TrackName.String,
 			ArtistName:       r.ArtistName.String,
 			AlbumTitle:       stringPtr(r.AlbumTitle),
+			AlbumImageURL:    stringPtr(r.AlbumImageUrl),
+			ArtistImageURL:   stringPtr(r.ArtistImageUrl),
 			Year:             int32Ptr(r.Year),
 			Genre:            stringPtr(r.Genre),
 			Popularity:       int32Ptr(r.Popularity),
@@ -296,6 +390,8 @@ func (s *MusicService) GetAlbum(ctx context.Context, id string) (*domain.Album, 
 			TrackName:        t.TrackName.String,
 			ArtistName:       t.ArtistName.String,
 			AlbumTitle:       &album.Title,
+			AlbumImageURL:    album.ImageURL,
+			ArtistImageURL:   stringPtr(t.ArtistImageUrl),
 			Year:             int32Ptr(t.Year),
 			Genre:            stringPtr(t.Genre),
 			Popularity:       int32Ptr(t.Popularity),
