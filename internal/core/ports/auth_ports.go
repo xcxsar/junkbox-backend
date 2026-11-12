@@ -14,11 +14,17 @@ import (
 
 // UserStore son las queries de usuarios usadas por auth.
 type UserStore interface {
-	CreateUser(ctx context.Context, arg sqlc.CreateUserParams) (sqlc.CreateUserRow, error)
 	GetUserByEmail(ctx context.Context, email string) (sqlc.User, error)
 	GetUserByUsername(ctx context.Context, username string) (sqlc.User, error)
 	GetUserByID(ctx context.Context, id uuid.UUID) (sqlc.User, error)
 	ExistsUserByEmailOrUsername(ctx context.Context, arg sqlc.ExistsUserByEmailOrUsernameParams) (bool, error)
+}
+
+// RegistrationTx crea el usuario y registra sus consentimientos
+// (domain.RegistrationConsents con la versión dada) en una sola transacción:
+// no queda una cuenta sin consentimiento guardado.
+type RegistrationTx interface {
+	CreateUser(ctx context.Context, arg sqlc.CreateUserParams, termsVersion string) (sqlc.CreateUserRow, error)
 }
 
 // TokenStore son las operaciones sobre refresh_tokens. RevokeRefreshToken

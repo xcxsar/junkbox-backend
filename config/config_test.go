@@ -2,6 +2,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -99,5 +100,32 @@ func TestMailInvalido(t *testing.T) {
 				t.Fatal("esperaba error")
 			}
 		})
+	}
+}
+
+func TestTermsVersion(t *testing.T) {
+	setRequired(t)
+	t.Setenv("TERMS_VERSION", "")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.TermsVersion != "2026-11-12" {
+		t.Errorf("TERMS_VERSION default = %q", cfg.TermsVersion)
+	}
+
+	t.Setenv("TERMS_VERSION", " 2027-01-01 ")
+	if cfg, err = Load(""); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.TermsVersion != "2027-01-01" {
+		t.Errorf("TERMS_VERSION = %q, esperaba 2027-01-01", cfg.TermsVersion)
+	}
+
+	for _, v := range []string{"   ", strings.Repeat("v", 51)} {
+		t.Setenv("TERMS_VERSION", v)
+		if _, err := Load(""); err == nil {
+			t.Errorf("esperaba error para TERMS_VERSION=%q", v)
+		}
 	}
 }

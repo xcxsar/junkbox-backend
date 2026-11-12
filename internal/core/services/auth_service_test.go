@@ -21,17 +21,20 @@ type fakeUserStore struct {
 	users       map[uuid.UUID]sqlc.User
 	createErr   error // error forzado en CreateUser (p. ej. carrera 23505)
 	existsCalls int
+	// consents guarda la versión de los términos aceptada por usuario.
+	consents map[uuid.UUID]string
 }
 
 func newFakeUserStore(seed ...sqlc.User) *fakeUserStore {
-	f := &fakeUserStore{users: map[uuid.UUID]sqlc.User{}}
+	f := &fakeUserStore{users: map[uuid.UUID]sqlc.User{}, consents: map[uuid.UUID]string{}}
 	for _, u := range seed {
 		f.users[u.ID] = u
 	}
 	return f
 }
 
-func (f *fakeUserStore) CreateUser(_ context.Context, arg sqlc.CreateUserParams) (sqlc.CreateUserRow, error) {
+// CreateUser implementa ports.RegistrationTx.
+func (f *fakeUserStore) CreateUser(_ context.Context, arg sqlc.CreateUserParams, termsVersion string) (sqlc.CreateUserRow, error) {
 	if f.createErr != nil {
 		return sqlc.CreateUserRow{}, f.createErr
 	}
@@ -46,6 +49,7 @@ func (f *fakeUserStore) CreateUser(_ context.Context, arg sqlc.CreateUserParams)
 		UpdatedAt:      time.Now(),
 	}
 	f.users[u.ID] = u
+	f.consents[u.ID] = termsVersion
 	return sqlc.CreateUserRow{
 		ID:          u.ID,
 		Username:    u.Username,
@@ -252,7 +256,7 @@ func newEnv() *testEnv {
 		tokens: newFakeTokenStore(),
 		rev:    newFakeRevocationStore(),
 	}
-	env.svc = NewAuthService(env.users, env.tokens, env.rev, fakeHasher{}, &fakeJWT{ttl: 15 * time.Minute}, 7*24*time.Hour)
+	env.svc = NewAuthService(env.users, env.users, env.tokens, env.rev, fakeHasher{}, &fakeJWT{ttl: 15 * time.Minute}, 7*24*time.Hour, testTermsVersion)
 	return env
 }
 
@@ -276,13 +280,16 @@ func testClaims() *domain.AccessClaims {
 	}
 }
 
+const testTermsVersion = "2026-11-12"
+
 func validRegister() RegisterInput {
 	return RegisterInput{
-		Username:    "Melomano_Pro",
-		Email:       " Melomano@Junkbox.local ",
-		Password:    "Password123!",
-		DisplayName: "Crítico Musical",
-		AvatarURL:   "https://api.dicebear.com/7.x/bottts/svg?seed=melomano",
+		Username:      "Melomano_Pro",
+		Email:         " Melomano@Junkbox.local ",
+		Password:      "Password123!",
+		DisplayName:   "Crítico Musical",
+		AvatarURL:     "https://api.dicebear.com/7.x/bottts/svg?seed=melomano",
+		TermsAccepted: true,
 	}
 }
 
@@ -309,6 +316,23 @@ func TestRegisterOK(t *testing.T) {
 	}
 	if len(env.tokens.byHash) != 1 {
 		t.Errorf("esperaba 1 refresh persistido, obtuve %d", len(env.tokens.byHash))
+	}
+	if v := env.users.consents[profile.ID]; v != testTermsVersion {
+		t.Errorf("versión de términos guardada = %q, esperaba %q", v, testTermsVersion)
+	}
+}
+
+func TestRegisterSinAceptarTerminos(t *testing.T) {
+	env := newEnv()
+	in := validRegister()
+	in.TermsAccepted = false
+	_, _, err := env.svc.Register(context.Background(), in)
+	var verr *domain.ValidationError
+	if !errors.As(err, &verr) {
+		t.Fatalf("esperaba ValidationError, obtuve %v", err)
+	}
+	if len(env.users.users) != 1 {
+		t.Errorf("no debe crearse el usuario sin aceptar los términos")
 	}
 }
 

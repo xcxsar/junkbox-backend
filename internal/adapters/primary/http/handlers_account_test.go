@@ -26,9 +26,6 @@ type accountFakes struct {
 	issued    int
 }
 
-func (f *accountFakes) CreateUser(context.Context, sqlc.CreateUserParams) (sqlc.CreateUserRow, error) {
-	return sqlc.CreateUserRow{}, errors.New("no usado")
-}
 func (f *accountFakes) GetUserByEmail(_ context.Context, email string) (sqlc.User, error) {
 	if f.lookupErr != nil {
 		return sqlc.User{}, f.lookupErr

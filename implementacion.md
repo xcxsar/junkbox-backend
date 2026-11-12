@@ -964,7 +964,7 @@ Errores de dominio (`internal/core/domain/user.go`): `ErrInvalidCredentials`, `E
 #### 3.5.3 Adaptadores Primarios HTTP Chi (`internal/adapters/primary/http/`)
 
 1. **DTOs (`dto/auth_dto.go`):**
-   - `RegisterRequest`: `username`, `email`, `password`, `display_name` (opcional), `avatar_url` (opcional).
+   - `RegisterRequest`: `username`, `email`, `password`, `display_name` (opcional), `avatar_url` (opcional), `terms_accepted` (obligatorio; `false` o ausente → 400). Al registrarse se guarda en `user_consents` una fila por documento (`terms`, `privacy`) con la versión `TERMS_VERSION`, en la misma transacción que el usuario (`postgres.RegistrationTx`).
    - `LoginRequest`: `identifier` (email o username), `password`.
    - `RefreshRequest`: `refresh_token`.
    - `LogoutRequest`: `refresh_token`, `all_sessions` (booleano opcional).

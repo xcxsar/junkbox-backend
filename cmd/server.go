@@ -68,7 +68,7 @@ func runServer(cmd *cobra.Command) {
 	jwtManager := security.NewJWTManager(cfg.JWTSecret, cfg.AccessTTL)
 	hasher := security.NewHasher(security.DefaultBcryptCost)
 	revocationChecker := chimw.NewRevocationChecker(queries)
-	authSvc := services.NewAuthService(queries, queries, queries, hasher, jwtManager, cfg.RefreshTTL)
+	authSvc := services.NewAuthService(queries, postgres.NewRegistrationTx(db), queries, queries, hasher, jwtManager, cfg.RefreshTTL, cfg.TermsVersion)
 
 	// 3b. Correos de cuenta (recuperación de contraseña y verificación): se
 	// encolan en email_outbox y un worker los envía con reintentos.

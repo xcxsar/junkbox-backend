@@ -46,12 +46,17 @@ const dummyHash = "$2a$12$DwPSk67AN5gwogfqGQ7LPOtig2kS80tsp4.w5eP6ERF30881lLJ.G"
 // AuthService implementa registro, login, rotación de refresh tokens,
 // logout y perfil.
 type AuthService struct {
-	users      ports.UserStore
-	tokens     ports.TokenStore
-	revocation ports.RevocationStore
-	hasher     ports.PasswordHasher
-	jwt        ports.TokenManager
-	refreshTTL time.Duration
+	users ports.UserStore
+	// registration crea el usuario junto con sus consentimientos.
+	registration ports.RegistrationTx
+	tokens       ports.TokenStore
+	revocation   ports.RevocationStore
+	hasher       ports.PasswordHasher
+	jwt          ports.TokenManager
+	refreshTTL   time.Duration
+	// termsVersion es la versión de los Términos y la Política de Privacidad
+	// que se registra como aceptada en cada alta (TERMS_VERSION).
+	termsVersion string
 	// verification envía el correo de verificación tras el registro. Es
 	// opcional (nil en tests que no lo usan).
 	verification VerificationSender
@@ -70,19 +75,23 @@ func (s *AuthService) SetVerificationSender(v VerificationSender) {
 }
 
 // NewAuthService crea el servicio. refreshTTL es la vigencia de los
-// refresh tokens (típicamente 168h, desde config).
-func NewAuthService(users ports.UserStore, tokens ports.TokenStore, revocation ports.RevocationStore, hasher ports.PasswordHasher, jwt ports.TokenManager, refreshTTL time.Duration) *AuthService {
-	return &AuthService{users: users, tokens: tokens, revocation: revocation, hasher: hasher, jwt: jwt, refreshTTL: refreshTTL}
+// refresh tokens (típicamente 168h, desde config) y termsVersion la versión
+// de los documentos legales que se registra al aceptar en el alta.
+func NewAuthService(users ports.UserStore, registration ports.RegistrationTx, tokens ports.TokenStore, revocation ports.RevocationStore, hasher ports.PasswordHasher, jwt ports.TokenManager, refreshTTL time.Duration, termsVersion string) *AuthService {
+	return &AuthService{users: users, registration: registration, tokens: tokens, revocation: revocation, hasher: hasher, jwt: jwt, refreshTTL: refreshTTL, termsVersion: termsVersion}
 }
 
 // RegisterInput son los datos de alta de un usuario. DisplayName y
-// AvatarURL son opcionales (cadena vacía = sin valor).
+// AvatarURL son opcionales (cadena vacía = sin valor). TermsAccepted es
+// obligatorio: sin aceptar los Términos y la Política de Privacidad no hay
+// alta.
 type RegisterInput struct {
-	Username    string
-	Email       string
-	Password    string
-	DisplayName string
-	AvatarURL   string
+	Username      string
+	Email         string
+	Password      string
+	DisplayName   string
+	AvatarURL     string
+	TermsAccepted bool
 }
 
 // Register valida los datos, crea el usuario y emite el par de tokens inicial.
@@ -110,13 +119,13 @@ func (s *AuthService) Register(ctx context.Context, in RegisterInput) (*domain.T
 	if err != nil {
 		return nil, nil, fmt.Errorf("auth: hashear contraseña: %w", err)
 	}
-	created, err := s.users.CreateUser(ctx, sqlc.CreateUserParams{
+	created, err := s.registration.CreateUser(ctx, sqlc.CreateUserParams{
 		Username:       in.Username,
 		Email:          in.Email,
 		HashedPassword: hash,
 		DisplayName:    nullString(in.DisplayName),
 		AvatarUrl:      nullString(in.AvatarURL),
-	})
+	}, s.termsVersion)
 	if err != nil {
 		// Carrera: otro registro con el mismo email/username entró entre
 		// la comprobación de unicidad y el INSERT.
@@ -353,6 +362,9 @@ func (s *AuthService) issuePair(ctx context.Context, user sqlc.User, familyID uu
 }
 
 func validateRegister(in RegisterInput) error {
+	if !in.TermsAccepted {
+		return domain.NewValidationError("debes aceptar los Términos de Servicio y la Política de Privacidad")
+	}
 	if !usernamePattern.MatchString(in.Username) {
 		return domain.NewValidationError("username inválido: 3 a 50 caracteres (letras, números, '_' o '.')")
 	}

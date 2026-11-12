@@ -52,11 +52,12 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	pair, profile, err := h.auth.Register(r.Context(), services.RegisterInput{
-		Username:    req.Username,
-		Email:       req.Email,
-		Password:    req.Password,
-		DisplayName: req.DisplayName,
-		AvatarURL:   req.AvatarURL,
+		Username:      req.Username,
+		Email:         req.Email,
+		Password:      req.Password,
+		DisplayName:   req.DisplayName,
+		AvatarURL:     req.AvatarURL,
+		TermsAccepted: req.TermsAccepted,
 	})
 	if err != nil {
 		writeServiceError(w, err)

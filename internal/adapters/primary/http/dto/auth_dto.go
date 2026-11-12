@@ -10,6 +10,8 @@ type RegisterRequest struct {
 	Password    string `json:"password"`
 	DisplayName string `json:"display_name,omitempty"`
 	AvatarURL   string `json:"avatar_url,omitempty"`
+	// TermsAccepted es obligatorio: false o ausente responde 400.
+	TermsAccepted bool `json:"terms_accepted"`
 }
 
 // LoginRequest es el cuerpo de POST /api/v1/auth/login. Identifier admite

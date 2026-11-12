@@ -46,6 +46,10 @@ type Config struct {
 	// frontend que pueden llamar a la API desde el navegador
 	// (default http://localhost:5173).
 	CORSAllowedOrigins []string
+	// TermsVersion es la versión vigente de los Términos de Servicio y la
+	// Política de Privacidad; se guarda como aceptada en cada registro
+	// (default "2026-11-12"). Actualizarla al publicar documentos nuevos.
+	TermsVersion string
 
 	// FrontendURL es el origen del frontend al que apuntan los enlaces de
 	// los correos (default: el primer origen de CORS_ALLOWED_ORIGINS).
@@ -102,6 +106,7 @@ func Load(envFile string) (*Config, error) {
 		FreqBlogAPIKey:      os.Getenv("FREQBLOG_API_KEY"),
 
 		CORSAllowedOrigins: listOr("CORS_ALLOWED_ORIGINS", []string{"http://localhost:5173"}),
+		TermsVersion:       strings.TrimSpace(envOr("TERMS_VERSION", "2026-11-12")),
 
 		FrontendURL:  os.Getenv("FRONTEND_URL"),
 		MailDriver:   envOr("MAIL_DRIVER", MailDriverLog),
@@ -184,6 +189,10 @@ func (c *Config) validate() error {
 	}
 	if c.SearchEnrichBudget <= 0 {
 		return fmt.Errorf("config: SEARCH_ENRICH_BUDGET debe ser positivo")
+	}
+	// user_consents.version es VARCHAR(50).
+	if c.TermsVersion == "" || len(c.TermsVersion) > 50 {
+		return fmt.Errorf("config: TERMS_VERSION debe tener entre 1 y 50 caracteres")
 	}
 	// Una lista vacía o un comodín abrirían la API a cualquier origen.
 	if len(c.CORSAllowedOrigins) == 0 {

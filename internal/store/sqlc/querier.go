@@ -71,6 +71,7 @@ type Querier interface {
 	GetUserRating(ctx context.Context, arg GetUserRatingParams) (Rating, error)
 	InsertEmailToken(ctx context.Context, arg InsertEmailTokenParams) error
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
+	InsertUserConsent(ctx context.Context, arg InsertUserConsentParams) error
 	InvalidateEmailTokens(ctx context.Context, arg InvalidateEmailTokensParams) error
 	IsAccessTokenRevoked(ctx context.Context, jti uuid.UUID) (bool, error)
 	ListReviewsByTarget(ctx context.Context, arg ListReviewsByTargetParams) ([]ListReviewsByTargetRow, error)

@@ -13,6 +13,48 @@ import (
 	"github.com/google/uuid"
 )
 
+type ConsentDocument string
+
+const (
+	ConsentDocumentTerms   ConsentDocument = "terms"
+	ConsentDocumentPrivacy ConsentDocument = "privacy"
+)
+
+func (e *ConsentDocument) Scan(src interface{}) error {
+	switch s := src.(type) {
+	case []byte:
+		*e = ConsentDocument(s)
+	case string:
+		*e = ConsentDocument(s)
+	default:
+		return fmt.Errorf("unsupported scan type for ConsentDocument: %T", src)
+	}
+	return nil
+}
+
+type NullConsentDocument struct {
+	ConsentDocument ConsentDocument `json:"consent_document"`
+	Valid           bool            `json:"valid"` // Valid is true if ConsentDocument is not NULL
+}
+
+// Scan implements the Scanner interface.
+func (ns *NullConsentDocument) Scan(value interface{}) error {
+	if value == nil {
+		ns.ConsentDocument, ns.Valid = "", false
+		return nil
+	}
+	ns.Valid = true
+	return ns.ConsentDocument.Scan(value)
+}
+
+// Value implements the driver Valuer interface.
+func (ns NullConsentDocument) Value() (driver.Value, error) {
+	if !ns.Valid {
+		return nil, nil
+	}
+	return string(ns.ConsentDocument), nil
+}
+
 type EmailTokenPurpose string
 
 const (
@@ -197,6 +239,13 @@ type User struct {
 type UserAccessRevocation struct {
 	UserID        uuid.UUID `json:"user_id"`
 	RevokedBefore time.Time `json:"revoked_before"`
+}
+
+type UserConsent struct {
+	UserID     uuid.UUID       `json:"user_id"`
+	Document   ConsentDocument `json:"document"`
+	Version    string          `json:"version"`
+	AcceptedAt time.Time       `json:"accepted_at"`
 }
 
 type UserEmailToken struct {

@@ -13,6 +13,7 @@ data:
   SEARCH_ENRICH_BUDGET: "2s"
   CORS_ALLOWED_ORIGINS: "http://localhost:5173"
   FRONTEND_URL: "http://localhost:5173"
+  TERMS_VERSION: "2026-11-12"
   PASSWORD_RESET_TTL: "30m"
   EMAIL_VERIFICATION_TTL: "24h"
   # Mailpit corre fuera del cluster, en la red Docker "kind" (deploy/compose.kind.yml).

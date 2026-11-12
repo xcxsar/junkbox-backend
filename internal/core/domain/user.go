@@ -64,3 +64,14 @@ type AccessClaims struct {
 	IssuedAt  time.Time
 	ExpiresAt time.Time
 }
+
+// ConsentDocument identifica un documento legal que el usuario acepta.
+type ConsentDocument string
+
+const (
+	ConsentTerms   ConsentDocument = "terms"
+	ConsentPrivacy ConsentDocument = "privacy"
+)
+
+// RegistrationConsents son los documentos que se aceptan al registrarse.
+var RegistrationConsents = []ConsentDocument{ConsentTerms, ConsentPrivacy}
