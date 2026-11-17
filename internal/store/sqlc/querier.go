@@ -202,17 +202,27 @@ type Querier interface {
 	RevokeRefreshToken(ctx context.Context, tokenHash string) (int64, error)
 	RevokeRefreshTokenFamily(ctx context.Context, familyID uuid.UUID) error
 	SearchAlbumsTrigram(ctx context.Context, arg SearchAlbumsTrigramParams) ([]SearchAlbumsTrigramRow, error)
+	// Artistas y álbumes también se comparan sin tildes; f_unaccent(name) y
+	// f_unaccent(title || ' ' || artist_name) deben coincidir con los índices
+	// idx_artists_name_unaccent_trgm e idx_albums_search_unaccent_trgm.
 	SearchArtistsTrigram(ctx context.Context, arg SearchArtistsTrigramParams) ([]SearchArtistsTrigramRow, error)
 	// Consultas del catálogo musical (Fase 3). Ninguna selecciona la columna
 	// embedding: sqlc no conoce el tipo vector, así que se expone como
 	// has_embedding y se escribe como texto ('[a,b,...]'::vector).
-	// La expresión coalesce(track_name, '') || ' ' || coalesce(artist_name, '')
-	// debe coincidir con la del índice idx_song_metadata_search_trgm.
+	// La expresión f_unaccent(coalesce(track_name, '') || ' ' ||
+	// coalesce(artist_name, '')) debe coincidir con la del índice
+	// idx_song_metadata_search_unaccent_trgm. La consulta y el texto se comparan
+	// sin tildes ("Zoe" encuentra a Zoé y es coincidencia exacta).
 	// strict_word_similarity mide qué tan bien las palabras de la consulta aparecen
 	// completas dentro del texto: "Yellow Coldplay" puntúa 1.0 contra "Yellow
 	// Coldplay" y a "Espresso Sabrina Carpenter" le falta una palabra en "Nonsense
-	// Sabrina Carpenter" (0.67). similarity() desempata a favor del texto más
-	// parecido en total (el título exacto antes que uno que solo lo contiene).
+	// Sabrina Carpenter" (0.67). Los empates (casi siempre a 1.0) se resuelven
+	// poniendo primero las coincidencias exactas (título, artista o título +
+	// artista igual a la consulta), después la popularidad y al final
+	// similarity(). Popularidad sola no basta: "Yellow" traería "Bodak Yellow"
+	// antes que las canciones que se llaman "Yellow". exact también le dice al
+	// servicio si la coincidencia es parcial ("Hoke" solo aparece dentro de
+	// títulos) para consultar Spotify.
 	// album_id, link_attempts y los campos artist_* (salvo la imagen) no se
 	// exponen: el servicio los usa para decidir qué completar con Spotify.
 	SearchTracksTrigram(ctx context.Context, arg SearchTracksTrigramParams) ([]SearchTracksTrigramRow, error)

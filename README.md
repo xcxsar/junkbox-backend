@@ -617,6 +617,8 @@ Busca por coincidencia difusa de palabras (`pg_trgm`, `strict_word_similarity` s
 
 Consulta a Spotify si no hay resultados locales o si el mejor puntaje es menor que `SEARCH_FALLBACK_THRESHOLD` (0.8). En ese caso guarda las canciones, artistas y álbumes en PostgreSQL y encola las canciones nuevas para calcular su vector de recomendaciones en segundo plano.
 
+La búsqueda ignora tildes en los tres tipos ("Zoe" encuentra a Zoé, "Beyonce" a Beyoncé). En `type=track` los empates de puntaje se ordenan así: primero las coincidencias exactas (el título, el artista o "título artista" es la consulta, sin distinguir mayúsculas ni tildes), después por `popularity` y al final por parecido total. Si la mejor canción local no es exacta (por ejemplo, "Hoke" solo aparece dentro de títulos como "Deewane Hoke Hum"), también se consulta Spotify: se responden primero sus canciones y después las locales que no repite, con `source: "spotify_fallback"`. Ver SEARCH-01 en [`docs/solicitudes.md`](docs/solicitudes.md).
+
 Si Spotify falla o no está configurado, responde los resultados locales que haya.
 
 Cada canción trae `album_image_url` (portada) y `artist_image_url`, y cada artista su `image_url`. Si faltan en el catálogo, la búsqueda las pide a Spotify antes de responder, en paralelo y con un tope de `SEARCH_ENRICH_BUDGET` (2 s):

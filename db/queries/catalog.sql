@@ -2,13 +2,20 @@
 -- embedding: sqlc no conoce el tipo vector, así que se expone como
 -- has_embedding y se escribe como texto ('[a,b,...]'::vector).
 
--- La expresión coalesce(track_name, '') || ' ' || coalesce(artist_name, '')
--- debe coincidir con la del índice idx_song_metadata_search_trgm.
+-- La expresión f_unaccent(coalesce(track_name, '') || ' ' ||
+-- coalesce(artist_name, '')) debe coincidir con la del índice
+-- idx_song_metadata_search_unaccent_trgm. La consulta y el texto se comparan
+-- sin tildes ("Zoe" encuentra a Zoé y es coincidencia exacta).
 -- strict_word_similarity mide qué tan bien las palabras de la consulta aparecen
 -- completas dentro del texto: "Yellow Coldplay" puntúa 1.0 contra "Yellow
 -- Coldplay" y a "Espresso Sabrina Carpenter" le falta una palabra en "Nonsense
--- Sabrina Carpenter" (0.67). similarity() desempata a favor del texto más
--- parecido en total (el título exacto antes que uno que solo lo contiene).
+-- Sabrina Carpenter" (0.67). Los empates (casi siempre a 1.0) se resuelven
+-- poniendo primero las coincidencias exactas (título, artista o título +
+-- artista igual a la consulta), después la popularidad y al final
+-- similarity(). Popularidad sola no basta: "Yellow" traería "Bodak Yellow"
+-- antes que las canciones que se llaman "Yellow". exact también le dice al
+-- servicio si la coincidencia es parcial ("Hoke" solo aparece dentro de
+-- títulos) para consultar Spotify.
 
 -- album_id, link_attempts y los campos artist_* (salvo la imagen) no se
 -- exponen: el servicio los usa para decidir qué completar con Spotify.
@@ -24,34 +31,43 @@ SELECT
     (ar.enriched_at IS NOT NULL)::bool AS artist_enriched,
     coalesce(ar.enrich_attempts, 0)::int AS artist_enrich_attempts,
     s.album_id, s.link_attempts,
-    strict_word_similarity(sqlc.arg(query)::text, coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, ''))::float8 AS score
+    strict_word_similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, '')))::float8 AS score,
+    (lower(f_unaccent(sqlc.arg(query)::text)) IN (
+        lower(f_unaccent(coalesce(s.track_name, ''))),
+        lower(f_unaccent(coalesce(s.artist_name, ''))),
+        lower(f_unaccent(coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, '')))
+    ))::bool AS exact
 FROM song_metadata s
 LEFT JOIN albums al ON al.id = s.album_id
 LEFT JOIN artists ar ON ar.id = s.artist_id
-WHERE sqlc.arg(query)::text <<% (coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, ''))
-ORDER BY score DESC,
-    similarity(sqlc.arg(query)::text, coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, '')) DESC,
-    s.popularity DESC NULLS LAST, s.id
+WHERE f_unaccent(sqlc.arg(query)::text) <<% f_unaccent(coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, ''))
+ORDER BY score DESC, exact DESC, s.popularity DESC NULLS LAST,
+    similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, ''))) DESC,
+    s.id
 LIMIT sqlc.arg(max_results);
+
+-- Artistas y álbumes también se comparan sin tildes; f_unaccent(name) y
+-- f_unaccent(title || ' ' || artist_name) deben coincidir con los índices
+-- idx_artists_name_unaccent_trgm e idx_albums_search_unaccent_trgm.
 
 -- name: SearchArtistsTrigram :many
 SELECT
     id, spotify_id, name, genres, popularity, image_url, created_at,
     (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts,
-    strict_word_similarity(sqlc.arg(query)::text, name)::float8 AS score
+    strict_word_similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(name))::float8 AS score
 FROM artists
-WHERE sqlc.arg(query)::text <<% name
-ORDER BY score DESC, similarity(sqlc.arg(query)::text, name) DESC, popularity DESC NULLS LAST, id
+WHERE f_unaccent(sqlc.arg(query)::text) <<% f_unaccent(name)
+ORDER BY score DESC, similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(name)) DESC, popularity DESC NULLS LAST, id
 LIMIT sqlc.arg(max_results);
 
 -- name: SearchAlbumsTrigram :many
 SELECT
     id, spotify_id, title, artist_id, artist_name, release_year, album_type,
     image_url, total_tracks, created_at,
-    strict_word_similarity(sqlc.arg(query)::text, title || ' ' || artist_name)::float8 AS score
+    strict_word_similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(title || ' ' || artist_name))::float8 AS score
 FROM albums
-WHERE sqlc.arg(query)::text <<% (title || ' ' || artist_name)
-ORDER BY score DESC, similarity(sqlc.arg(query)::text, title || ' ' || artist_name) DESC, id
+WHERE f_unaccent(sqlc.arg(query)::text) <<% f_unaccent(title || ' ' || artist_name)
+ORDER BY score DESC, similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(title || ' ' || artist_name)) DESC, id
 LIMIT sqlc.arg(max_results);
 
 -- GetTrack acepta el id local o el track_id de Spotify; el otro se pasa

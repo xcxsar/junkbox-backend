@@ -498,7 +498,7 @@ El pipeline es SQL puro ejecutado por `psql` dentro del contenedor, sin dependen
    - `loudness_norm = (loudness + 58.1) / (6.172 + 58.1)` (rango observado: −58.1 a 6.172 dB).
    - `tempo_norm = tempo / 250` (rango 0 a 250 BPM).
    - El resto de las variables ya está en $[0, 1]$; `mode` (0/1) se convierte a float.
-6. **Índices:** con los datos cargados se construye `idx_song_metadata_embedding_ivfflat` (`ivfflat`, `vector_cosine_ops`, `lists = 1000`, `maintenance_work_mem = 1GB`). Desde la Fase 3 también se reconstruye `idx_song_metadata_search_trgm` (GIN de búsqueda), que se quita al empezar la carga porque mantenerlo fila por fila es mucho más lento.
+6. **Índices:** con los datos cargados se construye `idx_song_metadata_embedding_ivfflat` (`ivfflat`, `vector_cosine_ops`, `lists = 1000`, `maintenance_work_mem = 1GB`). Desde la Fase 3 también se reconstruye el GIN de búsqueda (`idx_song_metadata_search_unaccent_trgm` desde SEARCH-01), que se quita al empezar la carga porque mantenerlo fila por fila es mucho más lento.
 7. Todo corre en una sola transacción (`--single-transaction`, `ON_ERROR_STOP=1`): si algo falla, la tabla queda vacía.
 
 > **Verificación:** en un Postgres temporal, el script de la Fase 1 cargó 1.159.764 filas en unos 50 s, y el checksum de `(raw_index, track_id, embedding)` coincidió exactamente con el del volumen original. Con los artistas y el GIN de la Fase 3, la carga completa tarda **1 min 37 s**.
@@ -516,9 +516,9 @@ BEGIN
 END
 $$;
 
--- El índice GIN de búsqueda (migración 20261027000004) se reconstruye al final:
+-- El índice GIN de búsqueda (migración 20261117000012) se reconstruye al final:
 -- mantenerlo fila por fila durante la carga y el UPDATE es mucho más lento.
-DROP INDEX IF EXISTS idx_song_metadata_search_trgm;
+DROP INDEX IF EXISTS idx_song_metadata_search_unaccent_trgm;
 
 \echo 'Cargando CSV en song_metadata...'
 \copy song_metadata (raw_index, artist_name, track_name, track_id, popularity, year, genre, danceability, energy, key, loudness, mode, speechiness, acousticness, instrumentalness, liveness, valence, tempo, duration_ms, time_signature) FROM pstdin WITH (FORMAT csv, HEADER true)
@@ -568,8 +568,8 @@ CREATE INDEX IF NOT EXISTS idx_song_metadata_embedding_ivfflat ON song_metadata
     USING ivfflat (embedding vector_cosine_ops) WITH (lists = 1000);
 
 \echo 'Construyendo índice de búsqueda por trigramas...'
-CREATE INDEX IF NOT EXISTS idx_song_metadata_search_trgm ON song_metadata
-    USING gin ((coalesce(track_name, '') || ' ' || coalesce(artist_name, '')) gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_song_metadata_search_unaccent_trgm ON song_metadata
+    USING gin (f_unaccent(coalesce(track_name, '') || ' ' || coalesce(artist_name, '')) gin_trgm_ops);
 
 \echo 'Ingesta completada.'
 ```
@@ -1058,7 +1058,7 @@ Esta fase implementa el entregable **1.3.2 del WBS de Junkbox**: búsqueda de m�
 | Audio features de canciones nuevas | `GET api.spotify.com/v1/audio-features` | **FreqBlog** (`GET api.freqblog.com/v1/audio-features`) | Spotify cerró ese endpoint para apps nuevas el 27-nov-2024 (responde 403). FreqBlog ofrece una ruta con la misma forma de respuesta. |
 | Identificador para los audio features | Spotify ID | **ISRC** (de `external_ids.isrc`); Spotify ID si no hay ISRC | Con un Spotify ID, FreqBlog devuelve `null` cuando el título es ambiguo. Un ISRC que todavía no tiene lo encola y lo resuelve en unos 15–30 s. |
 | Ingesta histórica | Script Python `make ingest-data` | `make ingest-songs` (SQL) crea también los artistas; para volúmenes cargados antes de la Fase 3 se agrega **`make backfill-artists`** (SQL) | El catálogo ya se carga en SQL puro (§2.8), así que no hace falta agregar dependencias de Python. |
-| Cuándo consultar Spotify | Solo con 0 resultados locales | Con 0 resultados **o** si el mejor puntaje es menor que `SEARCH_FALLBACK_THRESHOLD` (0.8) | Con 1.16M canciones casi cualquier consulta encuentra algo parecido, así que con la regla original Spotify casi nunca se consultaría. |
+| Cuándo consultar Spotify | Solo con 0 resultados locales | Con 0 resultados, **si** el mejor puntaje es menor que `SEARCH_FALLBACK_THRESHOLD` (0.8) **o**, en canciones, si la mejor no es una coincidencia exacta (SEARCH-01) | Con 1.16M canciones casi cualquier consulta encuentra algo parecido, así que con la regla original Spotify casi nunca se consultaría. Un artista que no está en el dataset ("Hoke") puntúa 1.0 contra títulos que contienen su nombre. |
 | Similitud | `similarity()` / `%` sobre `track_name` | `strict_word_similarity()` / `<<%` sobre `título + ' ' + artista` | Medido sobre el catálogo real: con `word_similarity`, "Grain" puntúa 1.0 contra "Les voyages en **train** / **Gra**nd Corps Malade", y "Espresso Sabrina Carpenter" puntúa 0.68 contra otras canciones de la artista. |
 | Artistas | `UNIQUE(name)` | `name` sin unicidad, `spotify_id UNIQUE`, y regla de "reclamo" (§4.4) | `UNIQUE(name)` fusiona a los homónimos. |
 | `limit` en Spotify | Hasta 50 por petición | Páginas de 10 con `offset` | Desde febrero de 2026, las apps en Development Mode tienen como máximo `limit=10` en `/v1/search`. |
@@ -1068,14 +1068,15 @@ Esta fase implementa el entregable **1.3.2 del WBS de Junkbox**: búsqueda de m�
 ### 4.1 Arquitectura del Flujo de Búsqueda y Fallback (Cache-Through)
 
 1. **Consulta local con trigramas (`pg_trgm`).** El backend busca en `song_metadata`, `artists` o `albums` con `strict_word_similarity`, apoyado en índices GIN de expresión.
-2. **Cache-hit.** Si hay resultados y el mejor puntaje es ≥ `SEARCH_FALLBACK_THRESHOLD`, se responden con `source: "local_cache"` sin consumir cuota de Spotify.
-3. **Cache-miss.** Si no:
+2. **Cache-hit.** Si hay resultados y el mejor puntaje es ≥ `SEARCH_FALLBACK_THRESHOLD`, se responden con `source: "local_cache"` sin consumir cuota de Spotify. En canciones, además, la mejor debe ser una **coincidencia exacta**: su título, su artista o "título artista" es la consulta (sin distinguir mayúsculas ni tildes). Canciones, artistas y álbumes comparan la consulta y el texto sin tildes (`f_unaccent`, migraciones `20261117000012` y `20261117000013`). Los empates de puntaje ponen primero las exactas, después ordenan por `popularity` y al final por `similarity()`.
+3. **Coincidencia parcial (solo canciones).** Si el puntaje alcanza el umbral pero la mejor canción no es exacta ("Hoke" dentro de "Deewane Hoke Hum"), se consulta Spotify igual que en el cache-miss y se responden primero sus canciones y después las locales que no repite, hasta `limit` (`source: "spotify_fallback"`). Si Spotify falla o no trae nada, se responden las locales.
+4. **Cache-miss.** Si no hay resultados o el puntaje es bajo:
    - Se llama a `GET /v1/search` de Spotify con credenciales de aplicación (*Client Credentials*).
    - En **una transacción** se guardan los artistas, los álbumes y las canciones.
    - Las canciones nuevas quedan con `pending_embedding = TRUE` y `embedding = NULL`; las que ya existían en el CSV conservan su embedding.
    - Se responde de inmediato con `source: "spotify_fallback"`.
-4. **Degradación.** Si Spotify falla o no está configurado, se responden los resultados locales aunque tengan puntaje bajo. Solo si tampoco hay resultados locales se responde `502` (Spotify falló) o una lista vacía (Spotify no configurado).
-5. **Embeddings asíncronos.** Las canciones pendientes se encolan en el worker (§4.5). El worker pide sus audio features a FreqBlog por lotes, imputa los nulos con la mediana del catálogo y guarda el `vector(10)`.
+5. **Degradación.** Si Spotify falla o no está configurado, se responden los resultados locales aunque tengan puntaje bajo. Solo si tampoco hay resultados locales se responde `502` (Spotify falló) o una lista vacía (Spotify no configurado).
+6. **Embeddings asíncronos.** Las canciones pendientes se encolan en el worker (§4.5). El worker pide sus audio features a FreqBlog por lotes, imputa los nulos con la mediana del catálogo y guarda el `vector(10)`.
 
 #### Latencia medida (catálogo de 1.16M canciones, caché caliente)
 
@@ -1085,7 +1086,9 @@ Esta fase implementa el entregable **1.3.2 del WBS de Junkbox**: búsqueda de m�
 | `Grain` (una palabra poco común) | ~240 ms |
 | `love`, `the`, `a` (una palabra muy común: 30k–340k candidatos) | 0,6–3 s |
 
-**Limitación conocida:** con una sola palabra muy común hay que calcular el puntaje de todos los candidatos para ordenarlos. Se probó un índice GiST (`gist_trgm_ops`, KNN con `<<<->`): baja esos casos a ~1 ms, pero sube las consultas de varias palabras a ~400–800 ms, y el planificador no combina bien ambos índices. No se adoptó. Si hace falta, las alternativas son una ruta KNN solo para consultas de una palabra o búsqueda de texto completo (`tsvector`).
+**Limitación conocida (coincidencias parciales):** una consulta que nunca coincide exactamente con un título o artista del catálogo ("Weeknd", "Tiny Desk") consulta Spotify en cada búsqueda. El cache-through no la convierte en `local_cache`. Un artista que no estaba en el dataset sí se resuelve: tras la primera búsqueda sus canciones quedan guardadas con su nombre y la siguiente ya es exacta.
+
+**Limitación conocida (palabras comunes):** con una sola palabra muy común hay que calcular el puntaje de todos los candidatos para ordenarlos. Se probó un índice GiST (`gist_trgm_ops`, KNN con `<<<->`): baja esos casos a ~1 ms, pero sube las consultas de varias palabras a ~400–800 ms, y el planificador no combina bien ambos índices. No se adoptó. Si hace falta, las alternativas son una ruta KNN solo para consultas de una palabra o búsqueda de texto completo (`tsvector`).
 
 > *Justificación de la consistencia eventual:* según el criterio SMART §4.1 del documento del proyecto, las recomendaciones se generan en procesos por lotes periódicos. Que el vector llegue unos segundos después no afecta al usuario y mantiene baja la latencia de la búsqueda.
 
@@ -1101,10 +1104,10 @@ sequenceDiagram
 
     Cliente->>API: GET /api/v1/music/search?q=...&type=track (Bearer JWT)
     API->>DB: strict_word_similarity sobre song_metadata
-    alt Mejor puntaje ≥ umbral (cache-hit)
+    alt Mejor puntaje ≥ umbral y coincidencia exacta (cache-hit)
         DB-->>API: Resultados locales
         API-->>Cliente: 200 OK (source: local_cache)
-    else Sin resultados o puntaje bajo (cache-miss)
+    else Sin resultados, puntaje bajo o coincidencia parcial
         API->>Spotify: GET /v1/search (páginas de 10, Client Credentials)
         Spotify-->>API: Tracks con artista, álbum e ISRC
         API->>DB: Transacción: artists → albums → song_metadata (pending_embedding=TRUE)
@@ -1246,7 +1249,7 @@ El CSV no trae IDs de artista ni álbumes, así que se crea un artista por cada 
   - **Medido:** **2 min 16 s** sobre 1.16M filas.
   - La primera versión mantenía el GIN fila por fila y tardaba ~18 min: el `UPDATE` no puede ser HOT porque `artist_id` está indexada, así que toca todos los índices.
 
-> La definición del índice `idx_song_metadata_search_trgm` aparece en la migración y en los dos scripts. Si cambia, hay que cambiarla en los tres sitios (y en `SearchTracksTrigram`).
+> La definición del índice de búsqueda aparece en la migración (desde SEARCH-01, `20261117000012_unaccent_track_search.sql`, que reemplaza a `idx_song_metadata_search_trgm` por `idx_song_metadata_search_unaccent_trgm`) y en los dos scripts. Si cambia, hay que cambiarla en los tres sitios (y en `SearchTracksTrigram`). Los scripts necesitan la función `f_unaccent` que crea esa migración.
 
 ```sql
 -- Crea los artistas del catálogo histórico a partir de song_metadata y
@@ -1269,7 +1272,7 @@ GROUP BY s.artist_name;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM song_metadata WHERE artist_id IS NULL AND artist_name IS NOT NULL) THEN
-    DROP INDEX IF EXISTS idx_song_metadata_search_trgm;
+    DROP INDEX IF EXISTS idx_song_metadata_search_unaccent_trgm;
   END IF;
 END
 $$;
@@ -1288,8 +1291,8 @@ WHERE s.artist_id IS NULL
   AND s.artist_name = a.name;
 
 \echo 'Construyendo índice de búsqueda por trigramas (si se quitó)...'
-CREATE INDEX IF NOT EXISTS idx_song_metadata_search_trgm ON song_metadata
-    USING gin ((coalesce(track_name, '') || ' ' || coalesce(artist_name, '')) gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_song_metadata_search_unaccent_trgm ON song_metadata
+    USING gin (f_unaccent(coalesce(track_name, '') || ' ' || coalesce(artist_name, '')) gin_trgm_ops);
 
 ANALYZE artists;
 ANALYZE song_metadata;
@@ -1314,13 +1317,20 @@ ANALYZE song_metadata;
 -- embedding: sqlc no conoce el tipo vector, así que se expone como
 -- has_embedding y se escribe como texto ('[a,b,...]'::vector).
 
--- La expresión coalesce(track_name, '') || ' ' || coalesce(artist_name, '')
--- debe coincidir con la del índice idx_song_metadata_search_trgm.
+-- La expresión f_unaccent(coalesce(track_name, '') || ' ' ||
+-- coalesce(artist_name, '')) debe coincidir con la del índice
+-- idx_song_metadata_search_unaccent_trgm. La consulta y el texto se comparan
+-- sin tildes ("Zoe" encuentra a Zoé y es coincidencia exacta).
 -- strict_word_similarity mide qué tan bien las palabras de la consulta aparecen
 -- completas dentro del texto: "Yellow Coldplay" puntúa 1.0 contra "Yellow
 -- Coldplay" y a "Espresso Sabrina Carpenter" le falta una palabra en "Nonsense
--- Sabrina Carpenter" (0.67). similarity() desempata a favor del texto más
--- parecido en total (el título exacto antes que uno que solo lo contiene).
+-- Sabrina Carpenter" (0.67). Los empates (casi siempre a 1.0) se resuelven
+-- poniendo primero las coincidencias exactas (título, artista o título +
+-- artista igual a la consulta), después la popularidad y al final
+-- similarity(). Popularidad sola no basta: "Yellow" traería "Bodak Yellow"
+-- antes que las canciones que se llaman "Yellow". exact también le dice al
+-- servicio si la coincidencia es parcial ("Hoke" solo aparece dentro de
+-- títulos) para consultar Spotify.
 
 -- name: SearchTracksTrigram :many
 SELECT
@@ -1328,32 +1338,37 @@ SELECT
     s.popularity, s.duration_ms, s.pending_embedding,
     (s.embedding IS NOT NULL)::bool AS has_embedding,
     al.title AS album_title,
-    strict_word_similarity(sqlc.arg(query)::text, coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, ''))::float8 AS score
+    strict_word_similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, '')))::float8 AS score,
+    (lower(f_unaccent(sqlc.arg(query)::text)) IN (
+        lower(f_unaccent(coalesce(s.track_name, ''))),
+        lower(f_unaccent(coalesce(s.artist_name, ''))),
+        lower(f_unaccent(coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, '')))
+    ))::bool AS exact
 FROM song_metadata s
 LEFT JOIN albums al ON al.id = s.album_id
-WHERE sqlc.arg(query)::text <<% (coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, ''))
-ORDER BY score DESC,
-    similarity(sqlc.arg(query)::text, coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, '')) DESC,
-    s.popularity DESC NULLS LAST, s.id
+WHERE f_unaccent(sqlc.arg(query)::text) <<% f_unaccent(coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, ''))
+ORDER BY score DESC, exact DESC, s.popularity DESC NULLS LAST,
+    similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, ''))) DESC,
+    s.id
 LIMIT sqlc.arg(max_results);
 
 -- name: SearchArtistsTrigram :many
 SELECT
     id, spotify_id, name, genres, popularity, image_url, created_at,
-    strict_word_similarity(sqlc.arg(query)::text, name)::float8 AS score
+    strict_word_similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(name))::float8 AS score
 FROM artists
-WHERE sqlc.arg(query)::text <<% name
-ORDER BY score DESC, similarity(sqlc.arg(query)::text, name) DESC, popularity DESC NULLS LAST, id
+WHERE f_unaccent(sqlc.arg(query)::text) <<% f_unaccent(name)
+ORDER BY score DESC, similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(name)) DESC, popularity DESC NULLS LAST, id
 LIMIT sqlc.arg(max_results);
 
 -- name: SearchAlbumsTrigram :many
 SELECT
     id, spotify_id, title, artist_id, artist_name, release_year, album_type,
     image_url, total_tracks, created_at,
-    strict_word_similarity(sqlc.arg(query)::text, title || ' ' || artist_name)::float8 AS score
+    strict_word_similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(title || ' ' || artist_name))::float8 AS score
 FROM albums
-WHERE sqlc.arg(query)::text <<% (title || ' ' || artist_name)
-ORDER BY score DESC, similarity(sqlc.arg(query)::text, title || ' ' || artist_name) DESC, id
+WHERE f_unaccent(sqlc.arg(query)::text) <<% f_unaccent(title || ' ' || artist_name)
+ORDER BY score DESC, similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(title || ' ' || artist_name)) DESC, id
 LIMIT sqlc.arg(max_results);
 
 -- GetTrack acepta el id local o el track_id de Spotify; el otro se pasa

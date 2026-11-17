@@ -26,7 +26,9 @@ const (
 	maxQueryLen        = 200
 	// DefaultFallbackThreshold es el puntaje (strict_word_similarity) mínimo
 	// del mejor resultado local para no consultar Spotify. Con 0.8, a una
-	// consulta de tres palabras no le puede faltar ninguna.
+	// consulta de tres palabras no le puede faltar ninguna. En canciones,
+	// además, el mejor resultado debe ser una coincidencia exacta (ver
+	// localResults.partial).
 	DefaultFallbackThreshold = 0.8
 	// DefaultEnrichBudget es el tiempo máximo que la búsqueda espera a
 	// Spotify para completar imágenes que faltan.
@@ -75,16 +77,23 @@ func NewMusicService(catalog ports.CatalogStore, importer ports.CatalogImporter,
 // trackArtists el spotify_id del artista de cada canción ("" si no se
 // conoce); ninguno de los dos se expone en la respuesta.
 type localResults struct {
-	results      any
-	count        int
-	best         float64 // puntaje del mejor resultado (0 si no hay)
+	results any
+	count   int
+	best    float64 // puntaje del mejor resultado (0 si no hay)
+	// partial: en canciones, el mejor resultado contiene las palabras de la
+	// consulta pero ni su título, ni su artista, ni ambos juntos son la
+	// consulta ("Hoke" en "Deewane Hoke Hum").
+	partial      bool
 	jobs         []domain.EnrichmentJob
 	trackArtists []string
 }
 
 // Search busca primero en el catálogo local y consulta Spotify si no hay
-// resultados o si el mejor puntaje no alcanza el umbral. Lo que devuelve
-// Spotify se persiste y las canciones nuevas se encolan para embedding.
+// resultados, si el mejor puntaje no alcanza el umbral o si la mejor
+// canción es solo una coincidencia parcial. En los dos primeros casos lo de
+// Spotify reemplaza a lo local; en el último va primero y le siguen las
+// canciones locales que no repite. Lo que devuelve Spotify se persiste y
+// las canciones nuevas se encolan para embedding.
 // Antes de responder completa con Spotify las imágenes que faltan (ver
 // enrichResults). limit = 0 usa DefaultSearchLimit.
 func (s *MusicService) Search(ctx context.Context, query, searchType string, limit int) (*domain.SearchResult, error) {
@@ -114,7 +123,8 @@ func (s *MusicService) Search(ctx context.Context, query, searchType string, lim
 	}
 	final, source := local, domain.SourceLocalCache
 
-	if (local.count == 0 || local.best < s.threshold) && s.provider != nil {
+	weak := local.count == 0 || local.best < s.threshold
+	if (weak || local.partial) && s.provider != nil {
 		remote, err := s.searchRemote(ctx, query, searchType, limit)
 		switch {
 		case err != nil && local.count > 0:
@@ -123,6 +133,8 @@ func (s *MusicService) Search(ctx context.Context, query, searchType string, lim
 			log.Printf("búsqueda en Spotify falló: %v", err)
 			return nil, domain.ErrMusicProviderUnavailable
 		case remote.count == 0 && local.count > 0:
+		case !weak:
+			final, source = mergeTracks(remote, local, limit), domain.SourceSpotifyFallback
 		default:
 			final, source = remote, domain.SourceSpotifyFallback
 		}
@@ -216,8 +228,33 @@ func (s *MusicService) searchLocal(ctx context.Context, query, searchType string
 				ArtistEnrichAttempts: r.ArtistEnrichAttempts,
 			}.jobs()...)
 		}
-		return localResults{results: out, count: len(out), best: bestScore(len(rows), func(i int) float64 { return rows[i].Score }), jobs: jobs, trackArtists: artists}, nil
+		// Las coincidencias exactas van primero (ver SearchTracksTrigram).
+		partial := len(rows) > 0 && !rows[0].Exact
+		return localResults{results: out, count: len(out), best: bestScore(len(rows), func(i int) float64 { return rows[i].Score }), partial: partial, jobs: jobs, trackArtists: artists}, nil
 	}
+}
+
+// mergeTracks pone primero las canciones de Spotify y después las locales
+// que no repiten ninguna, hasta limit. Los trabajos de enriquecimiento se
+// juntan sin filtrar: Resolve descarta los repetidos.
+func mergeTracks(remote, local localResults, limit int) localResults {
+	tracks := remote.results.([]domain.Track)
+	artists := remote.trackArtists
+	seen := make(map[string]bool, len(tracks))
+	for _, t := range tracks {
+		seen[t.SpotifyID] = true
+	}
+	for i, t := range local.results.([]domain.Track) {
+		if len(tracks) >= limit {
+			break
+		}
+		if !seen[t.SpotifyID] {
+			tracks = append(tracks, t)
+			artists = append(artists, local.trackArtists[i])
+		}
+	}
+	jobs := append(remote.jobs, local.jobs...)
+	return localResults{results: tracks, count: len(tracks), jobs: jobs, trackArtists: artists}
 }
 
 func (s *MusicService) searchRemote(ctx context.Context, query, searchType string, limit int) (localResults, error) {

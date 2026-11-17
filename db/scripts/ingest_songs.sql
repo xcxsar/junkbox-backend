@@ -10,9 +10,9 @@ BEGIN
 END
 $$;
 
--- El índice GIN de búsqueda (migración 20261027000004) se reconstruye al final:
+-- El índice GIN de búsqueda (migración 20261117000012) se reconstruye al final:
 -- mantenerlo fila por fila durante la carga y el UPDATE es mucho más lento.
-DROP INDEX IF EXISTS idx_song_metadata_search_trgm;
+DROP INDEX IF EXISTS idx_song_metadata_search_unaccent_trgm;
 
 \echo 'Cargando CSV en song_metadata...'
 \copy song_metadata (raw_index, artist_name, track_name, track_id, popularity, year, genre, danceability, energy, key, loudness, mode, speechiness, acousticness, instrumentalness, liveness, valence, tempo, duration_ms, time_signature) FROM pstdin WITH (FORMAT csv, HEADER true)
@@ -62,7 +62,7 @@ CREATE INDEX IF NOT EXISTS idx_song_metadata_embedding_ivfflat ON song_metadata
     USING ivfflat (embedding vector_cosine_ops) WITH (lists = 1000);
 
 \echo 'Construyendo índice de búsqueda por trigramas...'
-CREATE INDEX IF NOT EXISTS idx_song_metadata_search_trgm ON song_metadata
-    USING gin ((coalesce(track_name, '') || ' ' || coalesce(artist_name, '')) gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_song_metadata_search_unaccent_trgm ON song_metadata
+    USING gin (f_unaccent(coalesce(track_name, '') || ' ' || coalesce(artist_name, '')) gin_trgm_ops);
 
 \echo 'Ingesta completada.'

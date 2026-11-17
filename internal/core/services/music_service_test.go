@@ -147,6 +147,8 @@ func (f *fakeQueue) Enqueue(jobs ...domain.EmbeddingJob) {
 	f.jobs = append(f.jobs, jobs...)
 }
 
+// localTrack es una canción del catálogo; con puntaje 1.0 se toma como
+// coincidencia exacta (ver partialTrack).
 func localTrack(name string, score float64) sqlc.SearchTracksTrigramRow {
 	return sqlc.SearchTracksTrigramRow{
 		ID:           1,
@@ -155,7 +157,18 @@ func localTrack(name string, score float64) sqlc.SearchTracksTrigramRow {
 		ArtistName:   sql.NullString{String: "Dan Telfer", Valid: true},
 		HasEmbedding: true,
 		Score:        score,
+		Exact:        score == 1.0,
 	}
+}
+
+// partialTrack contiene todas las palabras de la consulta (puntaje 1.0)
+// sin que su título o artista sean la consulta.
+func partialTrack(id int32, trackID, name string) sqlc.SearchTracksTrigramRow {
+	r := localTrack(name, 1.0)
+	r.ID = id
+	r.TrackID = sql.NullString{String: trackID, Valid: true}
+	r.Exact = false
+	return r
 }
 
 func spotifyTrack() domain.ImportedTrack {
@@ -313,6 +326,67 @@ func TestSearchSpotifySinResultadosConservaLocales(t *testing.T) {
 	}
 	if res.Source != domain.SourceLocalCache || res.Count != 1 {
 		t.Fatalf("resultado inesperado: %+v", res)
+	}
+}
+
+func TestSearchCoincidenciaParcialConsultaSpotifyYMezcla(t *testing.T) {
+	f := newMusicFixture(true)
+	f.catalog.tracks = []sqlc.SearchTracksTrigramRow{
+		partialTrack(1, "1TIHAkrLbRALyt4O4Oh28i", "Kitni Bechain Hoke"),
+		partialTrack(2, "2qSkXiYOKEzfk3vhRpIQUR", "Hoke"), // también llega de Spotify
+		partialTrack(3, "3ZdJffjzJWFimSQyxgGIxN", "Deewane Hoke Hum"),
+	}
+	repeated := spotifyTrack() // 2qSkXiYOKEzfk3vhRpIQUR
+	other := spotifyTrack()
+	other.SpotifyID = "4uLU6hMCjMI75M1A2tKUQC"
+	f.provider.tracks = []domain.ImportedTrack{other, repeated}
+
+	res, err := f.svc.Search(context.Background(), "Hoke", "track", 3)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if res.Source != domain.SourceSpotifyFallback || f.provider.calls != 1 {
+		t.Fatalf("debía consultar Spotify: %+v (calls=%d)", res, f.provider.calls)
+	}
+	var got []string
+	for _, tr := range res.Results.([]domain.Track) {
+		got = append(got, tr.SpotifyID)
+	}
+	want := []string{"4uLU6hMCjMI75M1A2tKUQC", "2qSkXiYOKEzfk3vhRpIQUR", "1TIHAkrLbRALyt4O4Oh28i"}
+	if res.Count != len(want) || len(got) != len(want) {
+		t.Fatalf("resultados = %v (count=%d), se esperaba %v", got, res.Count, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("resultados = %v, se esperaba %v", got, want)
+		}
+	}
+}
+
+func TestSearchCoincidenciaExactaNoConsultaSpotify(t *testing.T) {
+	f := newMusicFixture(true)
+	f.catalog.tracks = []sqlc.SearchTracksTrigramRow{localTrack("Blinding Lights", 1.0), partialTrack(2, "3ZdJffjzJWFimSQyxgGIxN", "City Of Blinding Lights")}
+
+	res, err := f.svc.Search(context.Background(), "Blinding Lights", "track", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if res.Source != domain.SourceLocalCache || res.Count != 2 || f.provider.calls != 0 {
+		t.Fatalf("no debía consultar Spotify: %+v (calls=%d)", res, f.provider.calls)
+	}
+}
+
+func TestSearchCoincidenciaParcialSpotifyFallaRespondeLocales(t *testing.T) {
+	f := newMusicFixture(true)
+	f.catalog.tracks = []sqlc.SearchTracksTrigramRow{partialTrack(1, "1TIHAkrLbRALyt4O4Oh28i", "Deewane Hoke Hum")}
+	f.provider.err = errors.New("spotify caído")
+
+	res, err := f.svc.Search(context.Background(), "Hoke", "track", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if res.Source != domain.SourceLocalCache || res.Count != 1 {
+		t.Fatalf("debía responder los locales: %+v", res)
 	}
 }
 

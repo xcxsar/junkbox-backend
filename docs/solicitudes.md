@@ -579,3 +579,68 @@ Se descarta. El 2026-11-06 el propietario decidió reproducir **canciones comple
 #### Verificación
 
 - Sin cambios de código.
+
+---
+
+### SEARCH-01 · Un nombre de artista que coincide con palabras de títulos no consulta Spotify
+
+- **Estado:** Resuelta · **Fecha:** 2026-11-17
+- **Responsable:** Backend
+
+#### Qué se pidió
+
+`type=track` busca con `strict_word_similarity` sobre "título + artista" y solo consulta Spotify si el mejor puntaje es menor que 0.8. Se reportaron dos casos límite (comprobados 2026-11-06):
+
+- **"Hoke"**, un artista que no está en el dataset, puntúa 1.0 contra títulos como "Deewane Hoke Hum", así que nunca se consultaba Spotify ni aparecían sus canciones.
+- **"Blinding Lights"** sola ponía primero versiones de otros artistas: empatan a 1.0 y el desempate por `similarity` favorecía los nombres de artista cortos.
+
+Se propusieron dos opciones: traer las canciones del artista cuando `type=artist` coincide exactamente, u ordenar por `popularity` antes que por `similarity`.
+
+#### Decisión
+
+Se midieron las alternativas contra el catálogo local (1.16M canciones) el 2026-11-17:
+
+| Alternativa | Resultado | Veredicto |
+| --- | --- | --- |
+| `popularity` antes que `similarity` | Arregla "Blinding Lights" (The Weeknd pasa del 6.º al 1.º), "Hello" (Adele), "Halo" (Beyoncé) y "Shape of You" (Ed Sheeran), pero rompe las consultas de una palabra: "Yellow" → *Bodak Yellow*, "Stay" → *Stay With Me*, "Yellow Coldplay" → una versión *fingerstyle* antes que la de Coldplay | Descartada tal cual |
+| **Coincidencia exacta y después `popularity`** | Arregla los mismos casos sin esas regresiones | **Adoptada** |
+| Artista exacto → sus canciones de Spotify | *Get Artist's Top Tracks* no es una opción segura en Development Mode. Habría que buscar el artista y después sus canciones (1–3 llamadas extra por búsqueda) y solo cubre nombres de artista | Descartada |
+| **Coincidencia parcial → Spotify** | Reusa el respaldo de Spotify que ya existe. De 17 consultas de prueba, solo "Hoke", "Weeknd", "Bad Bunny" y "Tiny Desk" van a Spotify. Bad Bunny tampoco figura como artista principal en el dataset, así que también mejora | **Adoptada** |
+
+Cómo queda `type=track` (`artist` y `album` no cambian):
+
+- **Tildes:** la búsqueda de canciones las ignora tanto en el filtro y el puntaje como en la comparación exacta. Antes, "Zoe" no encontraba **ninguna** de las 56 canciones de Zoé (puntaje 0.33, no pasaba el filtro) y "Beyonce" no encontraba a Beyoncé. Se añadió la extensión `unaccent` con una función `f_unaccent` IMMUTABLE, y el índice GIN de búsqueda se reconstruyó sobre ella (migración `20261117000012`, ≈9 s en local). `type=artist` y `type=album` también las ignoran (migración `20261117000013`, índices `idx_artists_name_unaccent_trgm` e `idx_albums_search_unaccent_trgm`).
+- Una canción es **coincidencia exacta** si su título, su artista o "título artista" es la consulta, sin distinguir mayúsculas ni tildes.
+- **Orden:** puntaje, después las exactas, después `popularity` y al final `similarity`.
+- **Cuándo se consulta Spotify:** además de los casos de antes (sin resultados o puntaje < 0.8), cuando la mejor canción local no es exacta. Entonces se responden primero las canciones de Spotify y después las locales que no repite, hasta `limit`, con `source: "spotify_fallback"`. Si Spotify falla o no trae nada, se responden las locales como antes.
+- Lo que llega de Spotify se guarda como siempre. La segunda búsqueda de "Hoke" ya es exacta (sus canciones quedan con `artist_name = "Hoke"`) y responde `local_cache`.
+
+#### Contrato de la API
+
+Sin campos nuevos. Cambian el orden de `/music/search?type=track` y los casos en que responde `source: "spotify_fallback"`.
+
+| Consulta | Antes | Ahora |
+| --- | --- | --- |
+| `Hoke` (1.ª vez) | `local_cache`: "Kitni Bechain Hoke", "Deewane Hoke Hum"… | `spotify_fallback`: canciones de Hoke primero y después las locales |
+| `Hoke` (2.ª vez) | igual que la 1.ª | `local_cache`: "Olympique – Hoke", "Infrarrojo / Ultravioleta – Hoke", después las locales |
+| `Blinding Lights` | Roostz, Lofiwaala, Vendredi… | The Weeknd, Revelries, Saint Asonia… |
+| `Stay` | BTS, EXO, EDX… | Zedd, Rihanna, BLACKPINK… |
+| `Zoe` | ninguna canción de Zoé | Zoé: "Labios Rotos - En Vivo", "Azul", "Soñé - En Vivo"… (`local_cache`) |
+| `Beyonce` | sin canciones de Beyoncé | Beyoncé: "CUFF IT", "AMERICA HAS A PROBLEM"… (`local_cache`) |
+
+Las canciones que llegan de Spotify tienen `popularity: null` (Development Mode ya no la envía), así que dentro de un empate quedan después de las del dataset.
+
+#### Qué tiene que hacer el frontend
+
+Nada obligatorio. El Buscador puede mantener las tres búsquedas (`track`, `album`, `artist`) de `FrontEnd/implementacion.md` §6, y la lista de canciones ya trae las del artista desde la primera búsqueda.
+
+#### Pendiente / fuera de alcance
+
+- Una consulta que nunca es exacta en el catálogo ("Weeknd", "Tiny Desk") consulta Spotify en cada búsqueda: el cache-through no la convierte en `local_cache`. La primera página de Spotify puede traer canciones cuyo título contiene la palabra ("WEEKND – Bohemio") antes que las del artista.
+
+#### Verificación
+
+- `go test ./...`: casos nuevos en `music_service_test.go` (`TestSearchCoincidenciaParcialConsultaSpotifyYMezcla`, `TestSearchCoincidenciaExactaNoConsultaSpotify`, `TestSearchCoincidenciaParcialSpotifyFallaRespondeLocales`).
+- Prueba manual contra el servidor local: `Hoke` respondió `spotify_fallback` en ≈1,8 s (búsqueda, importación e imágenes) y la segunda vez `local_cache` en ≈35 ms, con las canciones de Hoke primero. `Blinding Lights`, `Yellow`, `Stay`, `The Weeknd` y `Yellow Coldplay` responden `local_cache` con el orden de la tabla. `Weeknd` responde `spotify_fallback`.
+- `EXPLAIN ANALYZE` de la consulta con "Love" y "Blinding Lights The Weeknd": el orden nuevo no cambia el plan (mismo *Bitmap Index Scan*) ni los tiempos (≈550 ms y ≈47 ms). Con `f_unaccent` la consulta usa `idx_song_metadata_search_unaccent_trgm` y los tiempos se mantienen ("Love" ≈330 ms, "Blinding Lights The Weeknd" ≈50 ms, "Yellow Coldplay" ≈15 ms, "Grain" ≈135 ms).
+- Sin tildes, contra el servidor local: `Zoe` y `zoé` devuelven las mismas canciones de Zoé, `Cancion` trae "Canción" y "Cancion", y `Beyonce` trae las de Beyoncé (todas `local_cache`). En artistas, `Zoe` trae primero a Zoé y `Beyonce` a Beyoncé; en álbumes, `Zoe` trae los de Zoé (consultas < 1 ms con los índices nuevos). Las dos migraciones se probaron en ambos sentidos (`down` restaura los índices originales y quita `unaccent`).

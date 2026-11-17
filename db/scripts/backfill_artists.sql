@@ -18,7 +18,7 @@ GROUP BY s.artist_name;
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM song_metadata WHERE artist_id IS NULL AND artist_name IS NOT NULL) THEN
-    DROP INDEX IF EXISTS idx_song_metadata_search_trgm;
+    DROP INDEX IF EXISTS idx_song_metadata_search_unaccent_trgm;
   END IF;
 END
 $$;
@@ -37,8 +37,8 @@ WHERE s.artist_id IS NULL
   AND s.artist_name = a.name;
 
 \echo 'Construyendo índice de búsqueda por trigramas (si se quitó)...'
-CREATE INDEX IF NOT EXISTS idx_song_metadata_search_trgm ON song_metadata
-    USING gin ((coalesce(track_name, '') || ' ' || coalesce(artist_name, '')) gin_trgm_ops);
+CREATE INDEX IF NOT EXISTS idx_song_metadata_search_unaccent_trgm ON song_metadata
+    USING gin (f_unaccent(coalesce(track_name, '') || ' ' || coalesce(artist_name, '')) gin_trgm_ops);
 
 ANALYZE artists;
 ANALYZE song_metadata;
