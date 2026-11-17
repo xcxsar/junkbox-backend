@@ -98,7 +98,8 @@ LIMIT 1;
 -- name: GetArtist :one
 SELECT id, spotify_id, name, genres, popularity, image_url, created_at,
     ratings_count, avg_rating,
-    (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts
+    (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts,
+    albums_synced_at, tracks_synced_at
 FROM artists
 WHERE id = sqlc.arg(id)::uuid OR spotify_id = sqlc.arg(spotify_id)::text
 LIMIT 1;
@@ -106,7 +107,8 @@ LIMIT 1;
 -- name: GetAlbum :one
 SELECT
     id, spotify_id, title, artist_id, artist_name, release_year, album_type,
-    image_url, total_tracks, created_at, ratings_count, avg_rating
+    image_url, total_tracks, created_at, ratings_count, avg_rating,
+    tracks_synced_at
 FROM albums
 WHERE id = sqlc.arg(id)::uuid OR spotify_id = sqlc.arg(spotify_id)::text
 LIMIT 1;
@@ -120,7 +122,64 @@ SELECT
 FROM song_metadata s
 LEFT JOIN artists ar ON ar.id = s.artist_id
 WHERE s.album_id = $1
-ORDER BY s.id;
+ORDER BY s.disc_number NULLS LAST, s.track_number NULLS LAST, s.id;
+
+-- --- Discografía de un artista (SEARCH-02) ---
+
+-- ListTracksByArtist devuelve las mismas columnas que SearchTracksTrigram
+-- (sin puntaje) para completar portadas e imágenes igual que la búsqueda.
+-- Las canciones importadas de Spotify no traen popularity (Development
+-- Mode): quedan después, por año y en orden del álbum.
+-- name: ListTracksByArtist :many
+SELECT
+    s.id, s.track_id, s.track_name, s.artist_name, s.year, s.genre,
+    s.popularity, s.duration_ms, s.pending_embedding,
+    (s.embedding IS NOT NULL)::bool AS has_embedding,
+    al.title AS album_title,
+    al.image_url AS album_image_url,
+    ar.image_url AS artist_image_url,
+    ar.spotify_id AS artist_spotify_id,
+    (ar.enriched_at IS NOT NULL)::bool AS artist_enriched,
+    coalesce(ar.enrich_attempts, 0)::int AS artist_enrich_attempts,
+    s.album_id, s.link_attempts
+FROM song_metadata s
+LEFT JOIN albums al ON al.id = s.album_id
+LEFT JOIN artists ar ON ar.id = s.artist_id
+WHERE s.artist_id = sqlc.arg(artist_id)::uuid
+ORDER BY s.popularity DESC NULLS LAST, s.year DESC NULLS LAST, al.title NULLS LAST,
+    s.disc_number NULLS LAST, s.track_number NULLS LAST, s.id
+LIMIT sqlc.arg(max_results);
+
+-- name: ListAlbumsByArtist :many
+SELECT
+    id, spotify_id, title, artist_id, artist_name, release_year, album_type,
+    image_url, total_tracks, created_at
+FROM albums
+WHERE artist_id = sqlc.arg(artist_id)::uuid
+ORDER BY release_year DESC NULLS LAST, (album_type = 'album') DESC, title, id
+LIMIT sqlc.arg(max_results);
+
+-- ListAlbumsToFillByArtist devuelve los álbumes del artista a los que les
+-- faltan pistas y que aún no se completaron, primero los álbumes (más
+-- pistas por llamada) y los más recientes.
+-- name: ListAlbumsToFillByArtist :many
+SELECT al.id, al.spotify_id
+FROM albums al
+WHERE al.artist_id = sqlc.arg(artist_id)::uuid
+  AND al.spotify_id IS NOT NULL
+  AND al.tracks_synced_at IS NULL
+  AND al.total_tracks > (SELECT count(*) FROM song_metadata s WHERE s.album_id = al.id)
+ORDER BY (al.album_type = 'album') DESC, al.release_year DESC NULLS LAST, al.id
+LIMIT sqlc.arg(max_results);
+
+-- name: MarkArtistAlbumsSynced :exec
+UPDATE artists SET albums_synced_at = NOW() WHERE id = $1;
+
+-- name: MarkArtistTracksSynced :exec
+UPDATE artists SET tracks_synced_at = NOW() WHERE id = $1;
+
+-- name: MarkAlbumTracksSynced :exec
+UPDATE albums SET tracks_synced_at = NOW() WHERE id = $1;
 
 -- --- Importación desde Spotify (CatalogImporter, dentro de una transacción) ---
 
@@ -178,9 +237,9 @@ RETURNING id, image_url;
 -- name: UpsertSongFromSpotify :one
 INSERT INTO song_metadata (
     track_id, track_name, artist_name, popularity, year, duration_ms,
-    isrc, artist_id, album_id, pending_embedding
+    isrc, artist_id, album_id, disc_number, track_number, pending_embedding
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE
 )
 ON CONFLICT (track_id) DO UPDATE SET
     track_name = coalesce(song_metadata.track_name, EXCLUDED.track_name),
@@ -191,6 +250,8 @@ ON CONFLICT (track_id) DO UPDATE SET
     isrc = coalesce(EXCLUDED.isrc, song_metadata.isrc),
     artist_id = coalesce(EXCLUDED.artist_id, song_metadata.artist_id),
     album_id = coalesce(EXCLUDED.album_id, song_metadata.album_id),
+    disc_number = coalesce(EXCLUDED.disc_number, song_metadata.disc_number),
+    track_number = coalesce(EXCLUDED.track_number, song_metadata.track_number),
     pending_embedding = song_metadata.embedding IS NULL
 RETURNING
     id, track_id, track_name, artist_name, year, genre, popularity, duration_ms,

@@ -146,7 +146,8 @@ func (q *Queries) FilterSongsForLinking(ctx context.Context, arg FilterSongsForL
 const getAlbum = `-- name: GetAlbum :one
 SELECT
     id, spotify_id, title, artist_id, artist_name, release_year, album_type,
-    image_url, total_tracks, created_at, ratings_count, avg_rating
+    image_url, total_tracks, created_at, ratings_count, avg_rating,
+    tracks_synced_at
 FROM albums
 WHERE id = $1::uuid OR spotify_id = $2::text
 LIMIT 1
@@ -158,18 +159,19 @@ type GetAlbumParams struct {
 }
 
 type GetAlbumRow struct {
-	ID           uuid.UUID      `json:"id"`
-	SpotifyID    sql.NullString `json:"spotify_id"`
-	Title        string         `json:"title"`
-	ArtistID     *uuid.UUID     `json:"artist_id"`
-	ArtistName   string         `json:"artist_name"`
-	ReleaseYear  sql.NullInt32  `json:"release_year"`
-	AlbumType    string         `json:"album_type"`
-	ImageUrl     sql.NullString `json:"image_url"`
-	TotalTracks  int32          `json:"total_tracks"`
-	CreatedAt    time.Time      `json:"created_at"`
-	RatingsCount int32          `json:"ratings_count"`
-	AvgRating    *float64       `json:"avg_rating"`
+	ID             uuid.UUID      `json:"id"`
+	SpotifyID      sql.NullString `json:"spotify_id"`
+	Title          string         `json:"title"`
+	ArtistID       *uuid.UUID     `json:"artist_id"`
+	ArtistName     string         `json:"artist_name"`
+	ReleaseYear    sql.NullInt32  `json:"release_year"`
+	AlbumType      string         `json:"album_type"`
+	ImageUrl       sql.NullString `json:"image_url"`
+	TotalTracks    int32          `json:"total_tracks"`
+	CreatedAt      time.Time      `json:"created_at"`
+	RatingsCount   int32          `json:"ratings_count"`
+	AvgRating      *float64       `json:"avg_rating"`
+	TracksSyncedAt sql.NullTime   `json:"tracks_synced_at"`
 }
 
 func (q *Queries) GetAlbum(ctx context.Context, arg GetAlbumParams) (GetAlbumRow, error) {
@@ -188,6 +190,7 @@ func (q *Queries) GetAlbum(ctx context.Context, arg GetAlbumParams) (GetAlbumRow
 		&i.CreatedAt,
 		&i.RatingsCount,
 		&i.AvgRating,
+		&i.TracksSyncedAt,
 	)
 	return i, err
 }
@@ -195,7 +198,8 @@ func (q *Queries) GetAlbum(ctx context.Context, arg GetAlbumParams) (GetAlbumRow
 const getArtist = `-- name: GetArtist :one
 SELECT id, spotify_id, name, genres, popularity, image_url, created_at,
     ratings_count, avg_rating,
-    (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts
+    (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts,
+    albums_synced_at, tracks_synced_at
 FROM artists
 WHERE id = $1::uuid OR spotify_id = $2::text
 LIMIT 1
@@ -218,6 +222,8 @@ type GetArtistRow struct {
 	AvgRating      *float64       `json:"avg_rating"`
 	Enriched       bool           `json:"enriched"`
 	EnrichAttempts int32          `json:"enrich_attempts"`
+	AlbumsSyncedAt sql.NullTime   `json:"albums_synced_at"`
+	TracksSyncedAt sql.NullTime   `json:"tracks_synced_at"`
 }
 
 func (q *Queries) GetArtist(ctx context.Context, arg GetArtistParams) (GetArtistRow, error) {
@@ -235,6 +241,8 @@ func (q *Queries) GetArtist(ctx context.Context, arg GetArtistParams) (GetArtist
 		&i.AvgRating,
 		&i.Enriched,
 		&i.EnrichAttempts,
+		&i.AlbumsSyncedAt,
+		&i.TracksSyncedAt,
 	)
 	return i, err
 }
@@ -410,6 +418,115 @@ func (q *Queries) GetTrack(ctx context.Context, arg GetTrackParams) (GetTrackRow
 	return i, err
 }
 
+const listAlbumsByArtist = `-- name: ListAlbumsByArtist :many
+SELECT
+    id, spotify_id, title, artist_id, artist_name, release_year, album_type,
+    image_url, total_tracks, created_at
+FROM albums
+WHERE artist_id = $1::uuid
+ORDER BY release_year DESC NULLS LAST, (album_type = 'album') DESC, title, id
+LIMIT $2
+`
+
+type ListAlbumsByArtistParams struct {
+	ArtistID   uuid.UUID `json:"artist_id"`
+	MaxResults int32     `json:"max_results"`
+}
+
+type ListAlbumsByArtistRow struct {
+	ID          uuid.UUID      `json:"id"`
+	SpotifyID   sql.NullString `json:"spotify_id"`
+	Title       string         `json:"title"`
+	ArtistID    *uuid.UUID     `json:"artist_id"`
+	ArtistName  string         `json:"artist_name"`
+	ReleaseYear sql.NullInt32  `json:"release_year"`
+	AlbumType   string         `json:"album_type"`
+	ImageUrl    sql.NullString `json:"image_url"`
+	TotalTracks int32          `json:"total_tracks"`
+	CreatedAt   time.Time      `json:"created_at"`
+}
+
+func (q *Queries) ListAlbumsByArtist(ctx context.Context, arg ListAlbumsByArtistParams) ([]ListAlbumsByArtistRow, error) {
+	rows, err := q.db.QueryContext(ctx, listAlbumsByArtist, arg.ArtistID, arg.MaxResults)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAlbumsByArtistRow
+	for rows.Next() {
+		var i ListAlbumsByArtistRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.SpotifyID,
+			&i.Title,
+			&i.ArtistID,
+			&i.ArtistName,
+			&i.ReleaseYear,
+			&i.AlbumType,
+			&i.ImageUrl,
+			&i.TotalTracks,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listAlbumsToFillByArtist = `-- name: ListAlbumsToFillByArtist :many
+SELECT al.id, al.spotify_id
+FROM albums al
+WHERE al.artist_id = $1::uuid
+  AND al.spotify_id IS NOT NULL
+  AND al.tracks_synced_at IS NULL
+  AND al.total_tracks > (SELECT count(*) FROM song_metadata s WHERE s.album_id = al.id)
+ORDER BY (al.album_type = 'album') DESC, al.release_year DESC NULLS LAST, al.id
+LIMIT $2
+`
+
+type ListAlbumsToFillByArtistParams struct {
+	ArtistID   uuid.UUID `json:"artist_id"`
+	MaxResults int32     `json:"max_results"`
+}
+
+type ListAlbumsToFillByArtistRow struct {
+	ID        uuid.UUID      `json:"id"`
+	SpotifyID sql.NullString `json:"spotify_id"`
+}
+
+// ListAlbumsToFillByArtist devuelve los álbumes del artista a los que les
+// faltan pistas y que aún no se completaron, primero los álbumes (más
+// pistas por llamada) y los más recientes.
+func (q *Queries) ListAlbumsToFillByArtist(ctx context.Context, arg ListAlbumsToFillByArtistParams) ([]ListAlbumsToFillByArtistRow, error) {
+	rows, err := q.db.QueryContext(ctx, listAlbumsToFillByArtist, arg.ArtistID, arg.MaxResults)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAlbumsToFillByArtistRow
+	for rows.Next() {
+		var i ListAlbumsToFillByArtistRow
+		if err := rows.Scan(&i.ID, &i.SpotifyID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPendingEmbeddingTracks = `-- name: ListPendingEmbeddingTracks :many
 
 SELECT track_id, isrc, embedding_attempts
@@ -465,7 +582,7 @@ SELECT
 FROM song_metadata s
 LEFT JOIN artists ar ON ar.id = s.artist_id
 WHERE s.album_id = $1
-ORDER BY s.id
+ORDER BY s.disc_number NULLS LAST, s.track_number NULLS LAST, s.id
 `
 
 type ListTracksByAlbumRow struct {
@@ -517,6 +634,119 @@ func (q *Queries) ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]
 	return items, nil
 }
 
+const listTracksByArtist = `-- name: ListTracksByArtist :many
+
+SELECT
+    s.id, s.track_id, s.track_name, s.artist_name, s.year, s.genre,
+    s.popularity, s.duration_ms, s.pending_embedding,
+    (s.embedding IS NOT NULL)::bool AS has_embedding,
+    al.title AS album_title,
+    al.image_url AS album_image_url,
+    ar.image_url AS artist_image_url,
+    ar.spotify_id AS artist_spotify_id,
+    (ar.enriched_at IS NOT NULL)::bool AS artist_enriched,
+    coalesce(ar.enrich_attempts, 0)::int AS artist_enrich_attempts,
+    s.album_id, s.link_attempts
+FROM song_metadata s
+LEFT JOIN albums al ON al.id = s.album_id
+LEFT JOIN artists ar ON ar.id = s.artist_id
+WHERE s.artist_id = $1::uuid
+ORDER BY s.popularity DESC NULLS LAST, s.year DESC NULLS LAST, al.title NULLS LAST,
+    s.disc_number NULLS LAST, s.track_number NULLS LAST, s.id
+LIMIT $2
+`
+
+type ListTracksByArtistParams struct {
+	ArtistID   uuid.UUID `json:"artist_id"`
+	MaxResults int32     `json:"max_results"`
+}
+
+type ListTracksByArtistRow struct {
+	ID                   int32          `json:"id"`
+	TrackID              sql.NullString `json:"track_id"`
+	TrackName            sql.NullString `json:"track_name"`
+	ArtistName           sql.NullString `json:"artist_name"`
+	Year                 sql.NullInt32  `json:"year"`
+	Genre                sql.NullString `json:"genre"`
+	Popularity           sql.NullInt32  `json:"popularity"`
+	DurationMs           sql.NullInt32  `json:"duration_ms"`
+	PendingEmbedding     bool           `json:"pending_embedding"`
+	HasEmbedding         bool           `json:"has_embedding"`
+	AlbumTitle           sql.NullString `json:"album_title"`
+	AlbumImageUrl        sql.NullString `json:"album_image_url"`
+	ArtistImageUrl       sql.NullString `json:"artist_image_url"`
+	ArtistSpotifyID      sql.NullString `json:"artist_spotify_id"`
+	ArtistEnriched       bool           `json:"artist_enriched"`
+	ArtistEnrichAttempts int32          `json:"artist_enrich_attempts"`
+	AlbumID              *uuid.UUID     `json:"album_id"`
+	LinkAttempts         int32          `json:"link_attempts"`
+}
+
+// --- Discografía de un artista (SEARCH-02) ---
+// ListTracksByArtist devuelve las mismas columnas que SearchTracksTrigram
+// (sin puntaje) para completar portadas e imágenes igual que la búsqueda.
+// Las canciones importadas de Spotify no traen popularity (Development
+// Mode): quedan después, por año y en orden del álbum.
+func (q *Queries) ListTracksByArtist(ctx context.Context, arg ListTracksByArtistParams) ([]ListTracksByArtistRow, error) {
+	rows, err := q.db.QueryContext(ctx, listTracksByArtist, arg.ArtistID, arg.MaxResults)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListTracksByArtistRow
+	for rows.Next() {
+		var i ListTracksByArtistRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.TrackID,
+			&i.TrackName,
+			&i.ArtistName,
+			&i.Year,
+			&i.Genre,
+			&i.Popularity,
+			&i.DurationMs,
+			&i.PendingEmbedding,
+			&i.HasEmbedding,
+			&i.AlbumTitle,
+			&i.AlbumImageUrl,
+			&i.ArtistImageUrl,
+			&i.ArtistSpotifyID,
+			&i.ArtistEnriched,
+			&i.ArtistEnrichAttempts,
+			&i.AlbumID,
+			&i.LinkAttempts,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const markAlbumTracksSynced = `-- name: MarkAlbumTracksSynced :exec
+UPDATE albums SET tracks_synced_at = NOW() WHERE id = $1
+`
+
+func (q *Queries) MarkAlbumTracksSynced(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, markAlbumTracksSynced, id)
+	return err
+}
+
+const markArtistAlbumsSynced = `-- name: MarkArtistAlbumsSynced :exec
+UPDATE artists SET albums_synced_at = NOW() WHERE id = $1
+`
+
+func (q *Queries) MarkArtistAlbumsSynced(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, markArtistAlbumsSynced, id)
+	return err
+}
+
 const markArtistEnrichmentFailed = `-- name: MarkArtistEnrichmentFailed :exec
 UPDATE artists
 SET enrich_attempts = enrich_attempts + 1,
@@ -532,6 +762,15 @@ type MarkArtistEnrichmentFailedParams struct {
 // Backoff exponencial: retry_base_seconds · 2^intentos.
 func (q *Queries) MarkArtistEnrichmentFailed(ctx context.Context, arg MarkArtistEnrichmentFailedParams) error {
 	_, err := q.db.ExecContext(ctx, markArtistEnrichmentFailed, arg.RetryBaseSeconds, arg.SpotifyID)
+	return err
+}
+
+const markArtistTracksSynced = `-- name: MarkArtistTracksSynced :exec
+UPDATE artists SET tracks_synced_at = NOW() WHERE id = $1
+`
+
+func (q *Queries) MarkArtistTracksSynced(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.ExecContext(ctx, markArtistTracksSynced, id)
 	return err
 }
 
@@ -1028,9 +1267,9 @@ func (q *Queries) UpsertArtistBySpotifyID(ctx context.Context, arg UpsertArtistB
 const upsertSongFromSpotify = `-- name: UpsertSongFromSpotify :one
 INSERT INTO song_metadata (
     track_id, track_name, artist_name, popularity, year, duration_ms,
-    isrc, artist_id, album_id, pending_embedding
+    isrc, artist_id, album_id, disc_number, track_number, pending_embedding
 ) VALUES (
-    $1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE
+    $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE
 )
 ON CONFLICT (track_id) DO UPDATE SET
     track_name = coalesce(song_metadata.track_name, EXCLUDED.track_name),
@@ -1041,6 +1280,8 @@ ON CONFLICT (track_id) DO UPDATE SET
     isrc = coalesce(EXCLUDED.isrc, song_metadata.isrc),
     artist_id = coalesce(EXCLUDED.artist_id, song_metadata.artist_id),
     album_id = coalesce(EXCLUDED.album_id, song_metadata.album_id),
+    disc_number = coalesce(EXCLUDED.disc_number, song_metadata.disc_number),
+    track_number = coalesce(EXCLUDED.track_number, song_metadata.track_number),
     pending_embedding = song_metadata.embedding IS NULL
 RETURNING
     id, track_id, track_name, artist_name, year, genre, popularity, duration_ms,
@@ -1049,15 +1290,17 @@ RETURNING
 `
 
 type UpsertSongFromSpotifyParams struct {
-	TrackID    sql.NullString `json:"track_id"`
-	TrackName  sql.NullString `json:"track_name"`
-	ArtistName sql.NullString `json:"artist_name"`
-	Popularity sql.NullInt32  `json:"popularity"`
-	Year       sql.NullInt32  `json:"year"`
-	DurationMs sql.NullInt32  `json:"duration_ms"`
-	Isrc       sql.NullString `json:"isrc"`
-	ArtistID   *uuid.UUID     `json:"artist_id"`
-	AlbumID    *uuid.UUID     `json:"album_id"`
+	TrackID     sql.NullString `json:"track_id"`
+	TrackName   sql.NullString `json:"track_name"`
+	ArtistName  sql.NullString `json:"artist_name"`
+	Popularity  sql.NullInt32  `json:"popularity"`
+	Year        sql.NullInt32  `json:"year"`
+	DurationMs  sql.NullInt32  `json:"duration_ms"`
+	Isrc        sql.NullString `json:"isrc"`
+	ArtistID    *uuid.UUID     `json:"artist_id"`
+	AlbumID     *uuid.UUID     `json:"album_id"`
+	DiscNumber  sql.NullInt32  `json:"disc_number"`
+	TrackNumber sql.NullInt32  `json:"track_number"`
 }
 
 type UpsertSongFromSpotifyRow struct {
@@ -1089,6 +1332,8 @@ func (q *Queries) UpsertSongFromSpotify(ctx context.Context, arg UpsertSongFromS
 		arg.Isrc,
 		arg.ArtistID,
 		arg.AlbumID,
+		arg.DiscNumber,
+		arg.TrackNumber,
 	)
 	var i UpsertSongFromSpotifyRow
 	err := row.Scan(

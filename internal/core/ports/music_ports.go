@@ -20,6 +20,13 @@ type CatalogStore interface {
 	GetArtist(ctx context.Context, arg sqlc.GetArtistParams) (sqlc.GetArtistRow, error)
 	GetAlbum(ctx context.Context, arg sqlc.GetAlbumParams) (sqlc.GetAlbumRow, error)
 	ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]sqlc.ListTracksByAlbumRow, error)
+	// Discografía de un artista (SEARCH-02).
+	ListTracksByArtist(ctx context.Context, arg sqlc.ListTracksByArtistParams) ([]sqlc.ListTracksByArtistRow, error)
+	ListAlbumsByArtist(ctx context.Context, arg sqlc.ListAlbumsByArtistParams) ([]sqlc.ListAlbumsByArtistRow, error)
+	ListAlbumsToFillByArtist(ctx context.Context, arg sqlc.ListAlbumsToFillByArtistParams) ([]sqlc.ListAlbumsToFillByArtistRow, error)
+	MarkArtistAlbumsSynced(ctx context.Context, id uuid.UUID) error
+	MarkArtistTracksSynced(ctx context.Context, id uuid.UUID) error
+	MarkAlbumTracksSynced(ctx context.Context, id uuid.UUID) error
 }
 
 // CatalogImporter persiste en una sola transacción lo que devuelve Spotify
@@ -36,6 +43,11 @@ type MusicProvider interface {
 	SearchTracks(ctx context.Context, query string, limit int) ([]domain.ImportedTrack, error)
 	SearchArtists(ctx context.Context, query string, limit int) ([]domain.ImportedArtist, error)
 	SearchAlbums(ctx context.Context, query string, limit int) ([]domain.ImportedAlbum, error)
+	// ArtistAlbums devuelve hasta limit álbumes y sencillos del artista,
+	// del más reciente al más antiguo (SEARCH-02).
+	ArtistAlbums(ctx context.Context, artistID string, limit int) ([]domain.ImportedAlbum, error)
+	// AlbumWithTracks devuelve el álbum y todas sus pistas.
+	AlbumWithTracks(ctx context.Context, albumID string) (domain.ImportedAlbum, []domain.ImportedTrack, error)
 }
 
 // MusicMetadataProvider obtiene una entidad del catálogo externo por su ID

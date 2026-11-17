@@ -147,6 +147,9 @@ type ImportedTrack struct {
 	ISRC       *string
 	Popularity *int32
 	DurationMs *int32
+	// DiscNumber y TrackNumber ordenan las pistas dentro del álbum.
+	DiscNumber  *int32
+	TrackNumber *int32
 }
 
 // ImportedSong es una canción ya persistida por CatalogImporter, con lo

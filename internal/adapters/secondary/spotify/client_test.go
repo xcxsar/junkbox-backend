@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,9 @@ type fakeSpotify struct {
 	expiresIn   int
 	search      func(w http.ResponseWriter, r *http.Request)
 	lookup      func(w http.ResponseWriter, r *http.Request)
+	// discography responde a /v1/artists/{id}/albums, /v1/albums/{id} y
+	// /v1/albums/{id}/tracks.
+	discography func(w http.ResponseWriter, r *http.Request)
 }
 
 func (f *fakeSpotify) start(t *testing.T) *Client {
@@ -44,6 +48,9 @@ func (f *fakeSpotify) start(t *testing.T) *Client {
 	})
 	mux.HandleFunc("GET /v1/artists/{id}", func(w http.ResponseWriter, r *http.Request) { f.lookup(w, r) })
 	mux.HandleFunc("GET /v1/tracks/{id}", func(w http.ResponseWriter, r *http.Request) { f.lookup(w, r) })
+	mux.HandleFunc("GET /v1/artists/{id}/albums", func(w http.ResponseWriter, r *http.Request) { f.discography(w, r) })
+	mux.HandleFunc("GET /v1/albums/{id}", func(w http.ResponseWriter, r *http.Request) { f.discography(w, r) })
+	mux.HandleFunc("GET /v1/albums/{id}/tracks", func(w http.ResponseWriter, r *http.Request) { f.discography(w, r) })
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return New(Config{ClientID: "client", ClientSecret: "secret", AccountsURL: srv.URL, APIURL: srv.URL})
@@ -281,5 +288,80 @@ func TestGetArtist429ConservaRetryAfter(t *testing.T) {
 	var ra interface{ RetryAfter() time.Duration }
 	if !errors.As(err, &ra) || ra.RetryAfter() != time.Hour {
 		t.Fatalf("err = %v, se esperaba un error con Retry-After", err)
+	}
+}
+
+// --- discografía ---
+
+func TestArtistAlbumsPaginaDeDiezEnDiez(t *testing.T) {
+	f := &fakeSpotify{expiresIn: 3600}
+	var offsets []string
+	f.discography = func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		if r.URL.Path != "/v1/artists/2x6kZekpNZMll7Uq3M6ar5/albums" || q.Get("include_groups") != "album,single" || q.Get("limit") != "10" {
+			t.Errorf("petición inesperada: %s?%s", r.URL.Path, r.URL.RawQuery)
+		}
+		offsets = append(offsets, q.Get("offset"))
+		n, next := 10, `"siguiente"`
+		if q.Get("offset") == "10" {
+			n, next = 3, "null" // 13 en total
+		}
+		items := make([]string, n)
+		for i := range items {
+			items[i] = `{"id":"a` + strconv.Itoa(i) + `","name":"Album","album_type":"single","release_date":"2025-01-01","total_tracks":1,"artists":[{"id":"2x6kZekpNZMll7Uq3M6ar5","name":"Hoke"}]}`
+		}
+		_, _ = w.Write([]byte(`{"items":[` + strings.Join(items, ",") + `],"next":` + next + `}`))
+	}
+	c := f.start(t)
+
+	got, err := c.ArtistAlbums(context.Background(), "2x6kZekpNZMll7Uq3M6ar5", 50)
+	if err != nil {
+		t.Fatalf("ArtistAlbums: %v", err)
+	}
+	if len(got) != 13 || len(offsets) != 2 || offsets[1] != "10" {
+		t.Fatalf("álbumes=%d offsets=%v", len(got), offsets)
+	}
+	if got[0].Artist.SpotifyID != "2x6kZekpNZMll7Uq3M6ar5" || got[0].AlbumType != "single" || *got[0].ReleaseYear != 2025 {
+		t.Fatalf("álbum mal mapeado: %+v", got[0])
+	}
+}
+
+func TestAlbumWithTracksPaginaYAsignaElAlbum(t *testing.T) {
+	f := &fakeSpotify{expiresIn: 3600}
+	track := func(id string, n int) string {
+		return `{"id":"` + id + `","name":"Pista","disc_number":1,"track_number":` + strconv.Itoa(n) + `,"artists":[{"id":"2x6kZekpNZMll7Uq3M6ar5","name":"Hoke"}]}`
+	}
+	f.discography = func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/albums/bbo":
+			_, _ = w.Write([]byte(`{"id":"bbo","name":"BBO","album_type":"album","release_date":"2019","total_tracks":3,
+				"images":[{"url":"bbo.jpg","width":640}],"artists":[{"id":"2x6kZekpNZMll7Uq3M6ar5","name":"Hoke"}],
+				"tracks":{"items":[` + track("t1", 1) + `,` + track("t2", 2) + `],"next":"siguiente"}}`))
+		case "/v1/albums/bbo/tracks":
+			if r.URL.Query().Get("offset") != "2" || r.URL.Query().Get("limit") != "50" {
+				t.Errorf("página inesperada: %s", r.URL.RawQuery)
+			}
+			_, _ = w.Write([]byte(`{"items":[` + track("t3", 3) + `],"next":null}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}
+	c := f.start(t)
+
+	album, tracks, err := c.AlbumWithTracks(context.Background(), "bbo")
+	if err != nil {
+		t.Fatalf("AlbumWithTracks: %v", err)
+	}
+	if album.Title != "BBO" || album.TotalTracks != 3 || len(tracks) != 3 {
+		t.Fatalf("álbum=%+v pistas=%d", album, len(tracks))
+	}
+	last := tracks[2]
+	if last.SpotifyID != "t3" || *last.TrackNumber != 3 || *last.DiscNumber != 1 || last.Album.SpotifyID != "bbo" ||
+		*last.Album.ImageURL != "bbo.jpg" || last.Artist.SpotifyID != "2x6kZekpNZMll7Uq3M6ar5" || last.ISRC != nil {
+		t.Fatalf("pista mal mapeada: %+v", last)
+	}
+
+	if _, _, err := c.AlbumWithTracks(context.Background(), "no-existe"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, se esperaba ErrNotFound", err)
 	}
 }

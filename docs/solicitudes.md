@@ -644,3 +644,116 @@ Nada obligatorio. El Buscador puede mantener las tres búsquedas (`track`, `albu
 - Prueba manual contra el servidor local: `Hoke` respondió `spotify_fallback` en ≈1,8 s (búsqueda, importación e imágenes) y la segunda vez `local_cache` en ≈35 ms, con las canciones de Hoke primero. `Blinding Lights`, `Yellow`, `Stay`, `The Weeknd` y `Yellow Coldplay` responden `local_cache` con el orden de la tabla. `Weeknd` responde `spotify_fallback`.
 - `EXPLAIN ANALYZE` de la consulta con "Love" y "Blinding Lights The Weeknd": el orden nuevo no cambia el plan (mismo *Bitmap Index Scan*) ni los tiempos (≈550 ms y ≈47 ms). Con `f_unaccent` la consulta usa `idx_song_metadata_search_unaccent_trgm` y los tiempos se mantienen ("Love" ≈330 ms, "Blinding Lights The Weeknd" ≈50 ms, "Yellow Coldplay" ≈15 ms, "Grain" ≈135 ms).
 - Sin tildes, contra el servidor local: `Zoe` y `zoé` devuelven las mismas canciones de Zoé, `Cancion` trae "Canción" y "Cancion", y `Beyonce` trae las de Beyoncé (todas `local_cache`). En artistas, `Zoe` trae primero a Zoé y `Beyonce` a Beyoncé; en álbumes, `Zoe` trae los de Zoé (consultas < 1 ms con los índices nuevos). Las dos migraciones se probaron en ambos sentidos (`down` restaura los índices originales y quita `unaccent`).
+
+---
+
+### SEARCH-02 · Canciones y álbumes de un artista
+
+- **Estado:** Resuelta · **Fecha:** 2026-11-17
+- **Responsable:** Backend
+
+#### Qué se pidió
+
+El Buscador (tarjeta Artistas) y la futura Ficha de Artista (`14244:52049`) necesitan la discografía, pero `GET /music/artists/{id}` no la trae. Se pidió:
+
+- `GET /music/artists/{id}/tracks?limit=` (por popularidad).
+- `GET /music/artists/{id}/albums?limit=` (con `image_url`).
+- `404` si el artista no existe.
+- Completar desde Spotify la lista de pistas de `GET /music/albums/{id}`: "BBO" de Hoke tenía `total_tracks: 11` y `tracks[]` traía 1 (comprobado 2026-11-06).
+
+#### Decisión
+
+Medido contra Spotify (Development Mode) y el catálogo local el 2026-11-17:
+
+| Fuente | Resultado |
+| --- | --- |
+| *Get Artist's Top Tracks* | **403**: Spotify lo quitó para Development Mode. No hay forma directa de pedir los "éxitos" de un artista |
+| Búsqueda `artist:"Hoke"` | Errática: `total 5`, y la página siguiente repite resultados. La búsqueda simple "Hoke" trae 3–4 canciones suyas por cada 10 |
+| `GET /v1/artists/{id}/albums` | Funciona, 10 por página. The Weeknd tiene 81 álbumes y sencillos, Zoé 43 y Hoke 27 |
+| `GET /v1/albums/{id}` | Trae el álbum y hasta 50 pistas en una llamada (BBO: 11) |
+
+Con eso:
+
+- **Álbumes del artista:** se piden a Spotify la primera vez y luego cada 7 días (hasta 50, `album,single`), se guardan y se responden desde la base. Orden: año descendente y, dentro del mismo año, álbumes antes que sencillos.
+- **Canciones del artista:** primero las del catálogo, por `popularity`. Si hay menos que `limit`, se completan con las pistas de sus álbumes más recientes (primero álbumes, luego sencillos, hasta 5 álbumes), una vez por semana. Se descartó la búsqueda por el ruido medido.
+- **Pistas de un álbum:** si hay menos que `total_tracks`, se piden a Spotify una sola vez por álbum y quedan guardadas en orden de disco y pista (columnas nuevas `disc_number` y `track_number`).
+- Todo ocurre antes de responder, con el presupuesto de 2 s (`SEARCH_ENRICH_BUDGET`). Si Spotify falla o no alcanza, se responde lo que hay y se reintenta en la siguiente petición. Las canciones importadas se encolan para su embedding.
+- Migración `20261117000014_artist_discography.sql`: marcas `albums_synced_at` y `tracks_synced_at` en `artists`, `tracks_synced_at` en `albums`, y `disc_number`/`track_number` en `song_metadata`.
+
+#### Contrato de la API
+
+`GET /api/v1/music/artists/{id}/tracks?limit=` (`id`: UUID local o ID de Spotify; `limit` 1–50, por defecto 20):
+
+```json
+{
+  "count": 20,
+  "results": [
+    {
+      "id": 1160032,
+      "spotify_id": "…",
+      "track_name": "Aimbot",
+      "artist_name": "Hoke",
+      "album_title": "TRES CREUS",
+      "album_image_url": "https://i.scdn.co/image/…",
+      "artist_image_url": "https://i.scdn.co/image/…",
+      "popularity": null,
+      "…": "resto de campos de Track, como en /music/search?type=track"
+    }
+  ]
+}
+```
+
+`GET /api/v1/music/artists/{id}/albums?limit=`:
+
+```json
+{
+  "count": 8,
+  "results": [
+    {
+      "id": "…",
+      "spotify_id": "…",
+      "title": "TRES CREUS",
+      "artist_id": "…",
+      "artist_name": "Hoke",
+      "release_year": 2024,
+      "album_type": "album",
+      "image_url": "https://i.scdn.co/image/…",
+      "total_tracks": 10,
+      "created_at": "…"
+    }
+  ]
+}
+```
+
+| Caso | Respuesta |
+| --- | --- |
+| Artista inexistente | `404 {"error": "no encontrado"}` |
+| `limit` fuera de 1–50 o `id` inválido | `400` |
+| Spotify falla o no está configurado | `200` con lo que hay en el catálogo |
+
+`GET /music/albums/{id}` no cambia de forma: `tracks[]` llega completo y en orden de disco y pista.
+
+#### Qué tiene que hacer el frontend
+
+1. Usar `/music/artists/{id}/tracks` y `/music/artists/{id}/albums` en la tarjeta Artistas y en la Ficha de Artista, y quitar la alternativa de `FrontEnd/implementacion.md` §7 (búsquedas filtradas por `artist_name`).
+2. Esperar que la primera visita a un artista o álbum nuevo tarde más (medido: ≈1,9 s los álbumes de Hoke, ≈0,4 s sus canciones). Las siguientes salen de la base en ≈40–70 ms.
+3. Mantener el recuadro neutro cuando `image_url` o `album_image_url` sean `null`.
+
+#### Pendiente / fuera de alcance
+
+- **No hay "éxitos" reales** para artistas fuera del dataset: Spotify no envía `popularity` en Development Mode, así que sus canciones salen en orden de álbum (del más reciente al más antiguo).
+- La discografía se limita a 50 lanzamientos propios (`album,single`), sin recopilaciones ni apariciones (`appears_on`).
+- Un álbum cuyo artista principal en Spotify es otro (una colaboración) queda asociado a ese otro artista.
+- Una misma canción puede aparecer dos veces si existe en el dataset y en otro lanzamiento con distinto ID de Spotify.
+- La sincronización completa del catálogo (CAT-01) sigue fuera de alcance.
+
+#### Verificación
+
+- `go test ./...`: `artist_discography_test.go` (sincronización única y por TTL, Spotify caído, artista sin `spotify_id`, completar canciones con pistas de álbumes respetando `limit` y el tope de 5, pistas de otro artista que no cuentan, 404 y `limit` inválido, y completitud del álbum: faltantes, ya sincronizado, 404 en Spotify, Spotify caído) y `client_test.go` (paginación de `ArtistAlbums` y de `AlbumWithTracks`, y mapeo de `track_number`).
+- Migración probada en ambos sentidos.
+- Prueba manual contra el servidor local:
+  - Hoke: álbumes de 2 a 27 (1.ª llamada ≈1,9 s, después ≈4 ms) y canciones de 2 a 20 (≈0,4 s, después ≈3 ms).
+  - "BBO": 11 de 11 pistas en orden.
+  - "Aztlán" de Zoé: de 1 a 12 pistas (≈0,2 s).
+  - The Weeknd: 5 canciones del dataset por popularidad, con portada y sin consultar Spotify. Sus álbumes salen desde "Hurry Up Tomorrow" (2025).
+  - Artista inexistente → 404; `limit=0` o `51` → 400.

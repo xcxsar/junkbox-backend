@@ -13,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/xcxsar/junkbox-backend/internal/core/domain"
 	"github.com/xcxsar/junkbox-backend/internal/core/ports"
@@ -61,6 +62,9 @@ type MusicService struct {
 	queue     ports.EmbeddingQueue // nil: no se encolan embeddings
 	threshold float64
 	enrich    SearchEnrichment
+	// inflight junta las sincronizaciones simultáneas de la misma
+	// discografía o álbum (ver artist_discography.go).
+	inflight singleflight.Group
 }
 
 // NewMusicService crea el servicio. provider y queue pueden ser nil (sin
@@ -198,40 +202,48 @@ func (s *MusicService) searchLocal(ctx context.Context, query, searchType string
 		if err != nil {
 			return localResults{}, fmt.Errorf("music: buscar canciones: %w", err)
 		}
-		out := make([]domain.Track, len(rows))
-		artists := make([]string, len(rows))
-		var jobs []domain.EnrichmentJob
-		for i, r := range rows {
-			out[i] = domain.Track{
-				ID:               r.ID,
-				SpotifyID:        r.TrackID.String,
-				TrackName:        r.TrackName.String,
-				ArtistName:       r.ArtistName.String,
-				AlbumTitle:       stringPtr(r.AlbumTitle),
-				AlbumImageURL:    stringPtr(r.AlbumImageUrl),
-				ArtistImageURL:   stringPtr(r.ArtistImageUrl),
-				Year:             int32Ptr(r.Year),
-				Genre:            stringPtr(r.Genre),
-				Popularity:       int32Ptr(r.Popularity),
-				DurationMs:       int32Ptr(r.DurationMs),
-				HasEmbedding:     r.HasEmbedding,
-				PendingEmbedding: r.PendingEmbedding,
-			}
-			artists[i] = r.ArtistSpotifyID.String
-			jobs = append(jobs, trackEnrichmentState{
-				SpotifyID:            r.TrackID.String,
-				AlbumID:              r.AlbumID,
-				LinkAttempts:         r.LinkAttempts,
-				HasArtistImage:       r.ArtistImageUrl.Valid,
-				ArtistSpotifyID:      r.ArtistSpotifyID.String,
-				ArtistEnriched:       r.ArtistEnriched,
-				ArtistEnrichAttempts: r.ArtistEnrichAttempts,
-			}.jobs()...)
-		}
+		res := trackResults(rows)
+		res.best = bestScore(len(rows), func(i int) float64 { return rows[i].Score })
 		// Las coincidencias exactas van primero (ver SearchTracksTrigram).
-		partial := len(rows) > 0 && !rows[0].Exact
-		return localResults{results: out, count: len(out), best: bestScore(len(rows), func(i int) float64 { return rows[i].Score }), partial: partial, jobs: jobs, trackArtists: artists}, nil
+		res.partial = len(rows) > 0 && !rows[0].Exact
+		return res, nil
 	}
+}
+
+// trackResults convierte filas de canciones del catálogo en resultados,
+// con lo que falta pedir a Spotify para completar sus imágenes.
+func trackResults(rows []sqlc.SearchTracksTrigramRow) localResults {
+	out := make([]domain.Track, len(rows))
+	artists := make([]string, len(rows))
+	var jobs []domain.EnrichmentJob
+	for i, r := range rows {
+		out[i] = domain.Track{
+			ID:               r.ID,
+			SpotifyID:        r.TrackID.String,
+			TrackName:        r.TrackName.String,
+			ArtistName:       r.ArtistName.String,
+			AlbumTitle:       stringPtr(r.AlbumTitle),
+			AlbumImageURL:    stringPtr(r.AlbumImageUrl),
+			ArtistImageURL:   stringPtr(r.ArtistImageUrl),
+			Year:             int32Ptr(r.Year),
+			Genre:            stringPtr(r.Genre),
+			Popularity:       int32Ptr(r.Popularity),
+			DurationMs:       int32Ptr(r.DurationMs),
+			HasEmbedding:     r.HasEmbedding,
+			PendingEmbedding: r.PendingEmbedding,
+		}
+		artists[i] = r.ArtistSpotifyID.String
+		jobs = append(jobs, trackEnrichmentState{
+			SpotifyID:            r.TrackID.String,
+			AlbumID:              r.AlbumID,
+			LinkAttempts:         r.LinkAttempts,
+			HasArtistImage:       r.ArtistImageUrl.Valid,
+			ArtistSpotifyID:      r.ArtistSpotifyID.String,
+			ArtistEnriched:       r.ArtistEnriched,
+			ArtistEnrichAttempts: r.ArtistEnrichAttempts,
+		}.jobs()...)
+	}
+	return localResults{results: out, count: len(out), jobs: jobs, trackArtists: artists}
 }
 
 // mergeTracks pone primero las canciones de Spotify y después las locales
@@ -459,7 +471,8 @@ func (s *MusicService) SummarizeTarget(ctx context.Context, target domain.Target
 }
 
 // GetAlbum devuelve un álbum, con sus pistas, por UUID local o por ID de
-// Spotify.
+// Spotify. Si le faltan pistas, las pide a Spotify antes de responder (una
+// sola vez, ver completeAlbumTracks).
 func (s *MusicService) GetAlbum(ctx context.Context, id string) (*domain.Album, error) {
 	localID, spotifyID, err := parseEntityID(id)
 	if err != nil {
@@ -475,6 +488,11 @@ func (s *MusicService) GetAlbum(ctx context.Context, id string) (*domain.Album, 
 	rows, err := s.catalog.ListTracksByAlbum(ctx, &album.ID)
 	if err != nil {
 		return nil, fmt.Errorf("music: listar pistas del álbum: %w", err)
+	}
+	if s.completeAlbumTracks(ctx, r, len(rows)) {
+		if rows, err = s.catalog.ListTracksByAlbum(ctx, &album.ID); err != nil {
+			return nil, fmt.Errorf("music: listar pistas del álbum: %w", err)
+		}
 	}
 	album.Tracks = make([]domain.Track, len(rows))
 	for i, t := range rows {

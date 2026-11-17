@@ -1553,6 +1553,11 @@ FROM song_metadata;
 - **Token de aplicación:** `POST https://accounts.spotify.com/api/token` con `Authorization: Basic base64(client_id:client_secret)` y `grant_type=client_credentials`.
 - **Caché del token:** protegida por un `sync.RWMutex` con doble comprobación. El token se renueva si le quedan menos de 60 s; ante un `401` se invalida y la petición se reintenta una vez.
 - **Búsqueda:** `GET /v1/search?type=track|artist|album&q=...&limit=10&offset=...`, paginando hasta completar el `limit` pedido. Desde febrero de 2026, en Development Mode el máximo es 10 por página.
+- **Discografía (SEARCH-02):**
+  - `GET /v1/artists/{id}/albums?include_groups=album,single`: 10 por página como máximo; con `limit=50` responde 400.
+  - `GET /v1/albums/{id}`: trae el álbum y sus primeras 50 pistas. El resto se pide a `GET /v1/albums/{id}/tracks` (50 por página). Las pistas vienen simplificadas: sin ISRC ni `popularity`, con `disc_number` y `track_number`.
+  - *Get Artist's Top Tracks* responde **403** en Development Mode (comprobado 2026-11-17).
+  - El servicio (`internal/core/services/artist_discography.go`) llama a estos endpoints dentro del presupuesto `SEARCH_ENRICH_BUDGET`. Las marcas `artists.albums_synced_at` y `artists.tracks_synced_at` se renuevan cada 7 días (`DiscographyTTL`); `albums.tracks_synced_at` se marca una sola vez, también si Spotify responde 404. Las llamadas simultáneas sobre el mismo artista o álbum se juntan con `singleflight`. Si Spotify falla, no se marca nada y se responde lo que hay en el catálogo.
 - **`429 Too Many Requests`:** si `Retry-After` es ≤ 5 s, espera y reintenta una vez; si es mayor, devuelve el error.
 - **Mapeo:**
   - artista principal (`artists[0]`);

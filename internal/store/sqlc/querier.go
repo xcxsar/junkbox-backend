@@ -126,6 +126,11 @@ type Querier interface {
 	// Me gusta idempotente. La reseña inexistente se detecta con
 	// GetReviewLikesCount (sin filas) antes de escribir.
 	LikeReview(ctx context.Context, arg LikeReviewParams) error
+	ListAlbumsByArtist(ctx context.Context, arg ListAlbumsByArtistParams) ([]ListAlbumsByArtistRow, error)
+	// ListAlbumsToFillByArtist devuelve los álbumes del artista a los que les
+	// faltan pistas y que aún no se completaron, primero los álbumes (más
+	// pistas por llamada) y los más recientes.
+	ListAlbumsToFillByArtist(ctx context.Context, arg ListAlbumsToFillByArtistParams) ([]ListAlbumsToFillByArtistRow, error)
 	ListArtistsByIDs(ctx context.Context, ids []uuid.UUID) ([]ListArtistsByIDsRow, error)
 	// Las listas paginan con keyset sobre (created_at, id del otro usuario),
 	// del seguimiento más reciente al más antiguo. followed_by_me es si
@@ -167,12 +172,21 @@ type Querier interface {
 	// usuarios que viewer_id ya sigue (seguir a alguien lo saca al instante).
 	ListSuggestionsForUser(ctx context.Context, arg ListSuggestionsForUserParams) ([]ListSuggestionsForUserRow, error)
 	ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]ListTracksByAlbumRow, error)
+	// --- Discografía de un artista (SEARCH-02) ---
+	// ListTracksByArtist devuelve las mismas columnas que SearchTracksTrigram
+	// (sin puntaje) para completar portadas e imágenes igual que la búsqueda.
+	// Las canciones importadas de Spotify no traen popularity (Development
+	// Mode): quedan después, por año y en orden del álbum.
+	ListTracksByArtist(ctx context.Context, arg ListTracksByArtistParams) ([]ListTracksByArtistRow, error)
 	// --- Borrado (postgres.CommentRemover, dentro de una transacción) ---
 	// LockComment bloquea el comentario: una respuesta nueva toma FOR KEY SHARE
 	// sobre su raíz y espera a que termine el borrado.
 	LockComment(ctx context.Context, id uuid.UUID) (LockCommentRow, error)
+	MarkAlbumTracksSynced(ctx context.Context, id uuid.UUID) error
+	MarkArtistAlbumsSynced(ctx context.Context, id uuid.UUID) error
 	// Backoff exponencial: retry_base_seconds · 2^intentos.
 	MarkArtistEnrichmentFailed(ctx context.Context, arg MarkArtistEnrichmentFailedParams) error
+	MarkArtistTracksSynced(ctx context.Context, id uuid.UUID) error
 	MarkEmailFailed(ctx context.Context, arg MarkEmailFailedParams) error
 	MarkEmailRetry(ctx context.Context, arg MarkEmailRetryParams) error
 	MarkEmailSent(ctx context.Context, id uuid.UUID) error

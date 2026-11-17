@@ -35,15 +35,17 @@ func (c *CatalogImporter) ImportTracks(ctx context.Context, tracks []domain.Impo
 				return err
 			}
 			row, err := q.UpsertSongFromSpotify(ctx, sqlc.UpsertSongFromSpotifyParams{
-				TrackID:    nonEmpty(t.SpotifyID),
-				TrackName:  nonEmpty(t.Name),
-				ArtistName: nonEmpty(t.Artist.Name),
-				Popularity: nullInt32(t.Popularity),
-				Year:       nullInt32(t.Album.ReleaseYear),
-				DurationMs: nullInt32(t.DurationMs),
-				Isrc:       nullString(t.ISRC),
-				ArtistID:   &artist.ID,
-				AlbumID:    &album.ID,
+				TrackID:     nonEmpty(t.SpotifyID),
+				TrackName:   nonEmpty(t.Name),
+				ArtistName:  nonEmpty(t.Artist.Name),
+				Popularity:  nullInt32(t.Popularity),
+				Year:        nullInt32(t.Album.ReleaseYear),
+				DurationMs:  nullInt32(t.DurationMs),
+				Isrc:        nullString(t.ISRC),
+				ArtistID:    &artist.ID,
+				AlbumID:     &album.ID,
+				DiscNumber:  nullInt32(t.DiscNumber),
+				TrackNumber: nullInt32(t.TrackNumber),
 			})
 			if err != nil {
 				return fmt.Errorf("guardar canción %s: %w", t.SpotifyID, err)

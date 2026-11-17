@@ -98,20 +98,21 @@ func (ns NullEmailTokenPurpose) Value() (driver.Value, error) {
 }
 
 type Album struct {
-	ID           uuid.UUID      `json:"id"`
-	SpotifyID    sql.NullString `json:"spotify_id"`
-	Title        string         `json:"title"`
-	ArtistID     *uuid.UUID     `json:"artist_id"`
-	ArtistName   string         `json:"artist_name"`
-	ReleaseYear  sql.NullInt32  `json:"release_year"`
-	AlbumType    string         `json:"album_type"`
-	ImageUrl     sql.NullString `json:"image_url"`
-	TotalTracks  int32          `json:"total_tracks"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
-	RatingsCount int32          `json:"ratings_count"`
-	RatingsSum   float64        `json:"ratings_sum"`
-	AvgRating    *float64       `json:"avg_rating"`
+	ID             uuid.UUID      `json:"id"`
+	SpotifyID      sql.NullString `json:"spotify_id"`
+	Title          string         `json:"title"`
+	ArtistID       *uuid.UUID     `json:"artist_id"`
+	ArtistName     string         `json:"artist_name"`
+	ReleaseYear    sql.NullInt32  `json:"release_year"`
+	AlbumType      string         `json:"album_type"`
+	ImageUrl       sql.NullString `json:"image_url"`
+	TotalTracks    int32          `json:"total_tracks"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
+	RatingsCount   int32          `json:"ratings_count"`
+	RatingsSum     float64        `json:"ratings_sum"`
+	AvgRating      *float64       `json:"avg_rating"`
+	TracksSyncedAt sql.NullTime   `json:"tracks_synced_at"`
 }
 
 type Artist struct {
@@ -129,6 +130,8 @@ type Artist struct {
 	EnrichedAt          sql.NullTime   `json:"enriched_at"`
 	EnrichAttempts      int32          `json:"enrich_attempts"`
 	NextEnrichAttemptAt sql.NullTime   `json:"next_enrich_attempt_at"`
+	AlbumsSyncedAt      sql.NullTime   `json:"albums_synced_at"`
+	TracksSyncedAt      sql.NullTime   `json:"tracks_synced_at"`
 }
 
 type EmailOutbox struct {
@@ -247,6 +250,8 @@ type SongMetadatum struct {
 	AvgRating              *float64        `json:"avg_rating"`
 	LinkAttempts           int32           `json:"link_attempts"`
 	NextLinkAttemptAt      sql.NullTime    `json:"next_link_attempt_at"`
+	DiscNumber             sql.NullInt32   `json:"disc_number"`
+	TrackNumber            sql.NullInt32   `json:"track_number"`
 }
 
 type User struct {

@@ -76,6 +76,8 @@ func NewRouter(opts RouterOptions) http.Handler {
 				r.Get("/music/search", opts.Music.Search)
 				r.Get("/music/tracks/{id}", opts.Music.Track)
 				r.Get("/music/artists/{id}", opts.Music.Artist)
+				r.Get("/music/artists/{id}/tracks", opts.Music.ArtistTracks)
+				r.Get("/music/artists/{id}/albums", opts.Music.ArtistAlbums)
 				r.Get("/music/albums/{id}", opts.Music.Album)
 			}
 			if opts.Ratings != nil {

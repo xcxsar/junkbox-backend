@@ -24,6 +24,8 @@ const (
 	// pageSize es el máximo de resultados por petición de /v1/search para
 	// apps en Development Mode (desde febrero de 2026); se pagina con offset.
 	pageSize = 10
+	// albumTracksPageSize es el máximo de /v1/albums/{id}/tracks.
+	albumTracksPageSize = 50
 	// tokenSkew renueva el token si le queda menos que esto de vida.
 	tokenSkew = 60 * time.Second
 	// maxRetryWait es la espera máxima ante un 429 antes de reintentar una
@@ -135,6 +137,68 @@ func (c *Client) SearchAlbums(ctx context.Context, query string, limit int) ([]d
 		return len(resp.Albums.Items), resp.Albums.Next != nil, nil
 	})
 	return out, err
+}
+
+// --- discografía ---
+
+// ArtistAlbums pagina GET /v1/artists/{id}/albums (álbumes y sencillos, sin
+// recopilaciones ni apariciones) de pageSize en pageSize hasta juntar
+// limit. Spotify los devuelve del más reciente al más antiguo.
+func (c *Client) ArtistAlbums(ctx context.Context, artistID string, limit int) ([]domain.ImportedAlbum, error) {
+	var out []domain.ImportedAlbum
+	for offset := 0; offset < limit; offset += pageSize {
+		n := min(pageSize, limit-offset)
+		params := url.Values{
+			"include_groups": {"album,single"},
+			"limit":          {strconv.Itoa(n)},
+			"offset":         {strconv.Itoa(offset)},
+		}
+		var resp page[albumObject]
+		if err := c.getObject(ctx, "/v1/artists/"+url.PathEscape(artistID)+"/albums?"+params.Encode(), &resp); err != nil {
+			return nil, fmt.Errorf("spotify: álbumes del artista %s: %w", artistID, err)
+		}
+		for _, a := range resp.Items {
+			out = append(out, a.toDomain())
+		}
+		if len(resp.Items) < n || resp.Next == nil {
+			break
+		}
+	}
+	return out, nil
+}
+
+// AlbumWithTracks obtiene el álbum con GET /v1/albums/{id}, que trae las
+// primeras 50 pistas, y pide el resto a /v1/albums/{id}/tracks. Las pistas
+// llegan simplificadas (sin ISRC ni popularidad): se les asigna este álbum.
+func (c *Client) AlbumWithTracks(ctx context.Context, albumID string) (domain.ImportedAlbum, []domain.ImportedTrack, error) {
+	var resp struct {
+		albumObject
+		Tracks page[trackObject] `json:"tracks"`
+	}
+	if err := c.getObject(ctx, "/v1/albums/"+url.PathEscape(albumID), &resp); err != nil {
+		return domain.ImportedAlbum{}, nil, fmt.Errorf("spotify: álbum %s: %w", albumID, err)
+	}
+	items := resp.Tracks.Items
+	for next := resp.Tracks.Next; next != nil; {
+		params := url.Values{"limit": {strconv.Itoa(albumTracksPageSize)}, "offset": {strconv.Itoa(len(items))}}
+		var more page[trackObject]
+		if err := c.getObject(ctx, "/v1/albums/"+url.PathEscape(albumID)+"/tracks?"+params.Encode(), &more); err != nil {
+			return domain.ImportedAlbum{}, nil, fmt.Errorf("spotify: pistas del álbum %s: %w", albumID, err)
+		}
+		if len(more.Items) == 0 {
+			break
+		}
+		items = append(items, more.Items...)
+		next = more.Next
+	}
+
+	album := resp.albumObject.toDomain()
+	tracks := make([]domain.ImportedTrack, len(items))
+	for i, t := range items {
+		tracks[i] = t.toDomain()
+		tracks[i].Album = album
+	}
+	return album, tracks, nil
 }
 
 // --- detalle por ID ---
@@ -365,6 +429,8 @@ type trackObject struct {
 	Name        string `json:"name"`
 	Popularity  *int32 `json:"popularity"` // ausente en Development Mode
 	DurationMs  *int32 `json:"duration_ms"`
+	DiscNumber  *int32 `json:"disc_number"`
+	TrackNumber *int32 `json:"track_number"`
 	ExternalIDs struct {
 		ISRC string `json:"isrc"`
 	} `json:"external_ids"`
@@ -404,11 +470,13 @@ func (a albumObject) toDomain() domain.ImportedAlbum {
 
 func (t trackObject) toDomain() domain.ImportedTrack {
 	track := domain.ImportedTrack{
-		SpotifyID:  t.ID,
-		Name:       t.Name,
-		Album:      t.Album.toDomain(),
-		Popularity: t.Popularity,
-		DurationMs: t.DurationMs,
+		SpotifyID:   t.ID,
+		Name:        t.Name,
+		Album:       t.Album.toDomain(),
+		Popularity:  t.Popularity,
+		DurationMs:  t.DurationMs,
+		DiscNumber:  t.DiscNumber,
+		TrackNumber: t.TrackNumber,
 	}
 	if len(t.Artists) > 0 {
 		track.Artist = t.Artists[0].toDomain()

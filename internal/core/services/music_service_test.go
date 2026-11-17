@@ -32,6 +32,20 @@ type fakeCatalog struct {
 
 	lastTrackArg  sqlc.GetTrackParams
 	lastArtistArg sqlc.GetArtistParams
+
+	// Discografía (SEARCH-02). Los *After son lo que devuelve la segunda
+	// lectura, ya con lo importado de Spotify (nil: siempre lo mismo).
+	artistTracks      []sqlc.ListTracksByArtistRow
+	artistTracksAfter []sqlc.ListTracksByArtistRow
+	artistTracksReads int
+	albumTracksAfter  []sqlc.ListTracksByAlbumRow
+	albumTracksReads  int
+	artistAlbums      []sqlc.ListAlbumsByArtistRow
+	albumsToFill      []sqlc.ListAlbumsToFillByArtistRow
+	lastFillArg       sqlc.ListAlbumsToFillByArtistParams
+	albumsSynced      []uuid.UUID
+	tracksSynced      []uuid.UUID
+	albumTracksSynced []uuid.UUID
 }
 
 func (f *fakeCatalog) SearchTracksTrigram(_ context.Context, _ sqlc.SearchTracksTrigramParams) ([]sqlc.SearchTracksTrigramRow, error) {
@@ -74,13 +88,74 @@ func (f *fakeCatalog) GetAlbum(_ context.Context, _ sqlc.GetAlbumParams) (sqlc.G
 }
 
 func (f *fakeCatalog) ListTracksByAlbum(_ context.Context, _ *uuid.UUID) ([]sqlc.ListTracksByAlbumRow, error) {
+	f.albumTracksReads++
+	if f.albumTracksAfter != nil && f.albumTracksReads > 1 {
+		return f.albumTracksAfter, nil
+	}
 	return f.albumTracks, nil
+}
+
+func (f *fakeCatalog) ListTracksByArtist(_ context.Context, _ sqlc.ListTracksByArtistParams) ([]sqlc.ListTracksByArtistRow, error) {
+	f.artistTracksReads++
+	if f.artistTracksAfter != nil && f.artistTracksReads > 1 {
+		return f.artistTracksAfter, nil
+	}
+	return f.artistTracks, nil
+}
+
+func (f *fakeCatalog) ListAlbumsByArtist(_ context.Context, _ sqlc.ListAlbumsByArtistParams) ([]sqlc.ListAlbumsByArtistRow, error) {
+	return f.artistAlbums, nil
+}
+
+func (f *fakeCatalog) ListAlbumsToFillByArtist(_ context.Context, arg sqlc.ListAlbumsToFillByArtistParams) ([]sqlc.ListAlbumsToFillByArtistRow, error) {
+	f.lastFillArg = arg
+	return f.albumsToFill, nil
+}
+
+func (f *fakeCatalog) MarkArtistAlbumsSynced(_ context.Context, id uuid.UUID) error {
+	f.albumsSynced = append(f.albumsSynced, id)
+	return nil
+}
+
+func (f *fakeCatalog) MarkArtistTracksSynced(_ context.Context, id uuid.UUID) error {
+	f.tracksSynced = append(f.tracksSynced, id)
+	return nil
+}
+
+func (f *fakeCatalog) MarkAlbumTracksSynced(_ context.Context, id uuid.UUID) error {
+	f.albumTracksSynced = append(f.albumTracksSynced, id)
+	return nil
 }
 
 type fakeProvider struct {
 	tracks []domain.ImportedTrack
 	err    error
 	calls  int
+
+	// Discografía: albums es lo que devuelve ArtistAlbums y albumTracks
+	// las pistas de cada álbum por su ID de Spotify.
+	albums      []domain.ImportedAlbum
+	albumTracks map[string][]domain.ImportedTrack
+	discErr     error
+	albumsCalls int
+	albumCalls  int
+}
+
+func (f *fakeProvider) ArtistAlbums(_ context.Context, _ string, _ int) ([]domain.ImportedAlbum, error) {
+	f.albumsCalls++
+	return f.albums, f.discErr
+}
+
+func (f *fakeProvider) AlbumWithTracks(_ context.Context, id string) (domain.ImportedAlbum, []domain.ImportedTrack, error) {
+	f.albumCalls++
+	if f.discErr != nil {
+		return domain.ImportedAlbum{}, nil, f.discErr
+	}
+	tracks, ok := f.albumTracks[id]
+	if !ok {
+		return domain.ImportedAlbum{}, nil, domain.ErrNotFound
+	}
+	return domain.ImportedAlbum{SpotifyID: id}, tracks, nil
 }
 
 func (f *fakeProvider) SearchTracks(_ context.Context, _ string, _ int) ([]domain.ImportedTrack, error) {

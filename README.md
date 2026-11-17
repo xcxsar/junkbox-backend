@@ -781,8 +781,29 @@ curl -i -X GET "http://localhost:8080/api/v1/music/artists/74KM79TiuVKeVCqs8QtB0
 
 ---
 
+#### 13.1. Canciones de un Artista (`GET /api/v1/music/artists/{id}/tracks?limit=`)
+Devuelve las canciones del artista (`id`: ID de Spotify o UUID local), ordenadas por `popularity` y después por año y orden en el álbum. `limit` va de 1 a 50 (por defecto 20).
+
+Si el catálogo tiene menos que `limit` y el artista tiene `spotify_id`, antes de responder se importan de Spotify las pistas de sus álbumes más recientes (primero álbumes y luego sencillos, hasta 5 álbumes, con tope de `SEARCH_ENRICH_BUDGET`). Se hace una vez por semana por artista. Las canciones importadas tienen `popularity: null` (Spotify no la envía en Development Mode) y quedan después de las del dataset. Como en la búsqueda, se completan `album_image_url` y `artist_image_url`.
+
+```bash
+curl -i "http://localhost:8080/api/v1/music/artists/2x6kZekpNZMll7Uq3M6ar5/tracks?limit=20" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+**Respuesta (`200 OK`):** `{"count": 20, "results": [Track…]}`, con los mismos objetos que `/music/search?type=track`. `404` si el artista no existe.
+
+#### 13.2. Álbumes de un Artista (`GET /api/v1/music/artists/{id}/albums?limit=`)
+Devuelve los álbumes y sencillos del artista, del más reciente al más antiguo (los álbumes antes que los sencillos del mismo año), con `image_url`. `limit` va de 1 a 50 (por defecto 20).
+
+La primera vez, y después una vez por semana, se piden a Spotify (`GET /v1/artists/{id}/albums`, sin recopilaciones ni apariciones, hasta 50) antes de responder. Si Spotify falla, se responden los que ya hay.
+
+**Respuesta (`200 OK`):** `{"count": n, "results": [Album…]}`. Cada álbum es como en el detalle, sin `tracks` ni `ratings`. `404` si el artista no existe.
+
+---
+
 #### 14. Detalle de Álbum (`GET /api/v1/music/albums/{id}`)
-Obtiene los datos del álbum, su carátula, su artista, sus `ratings` y sus pistas (las que ya están en el catálogo local), por ID de Spotify o UUID local.
+Obtiene los datos del álbum, su carátula, su artista, sus `ratings` y sus pistas en orden de disco y pista, por ID de Spotify o UUID local. Si en el catálogo hay menos pistas que `total_tracks`, antes de responder se importan de Spotify (`GET /v1/albums/{id}`, una sola vez por álbum).
 
 ```bash
 curl -i -X GET "http://localhost:8080/api/v1/music/albums/2lIZef49vdWi0LMePaA4Sp" \

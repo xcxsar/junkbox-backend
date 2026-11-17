@@ -77,6 +77,40 @@ func (h *MusicHandler) Artist(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, artist)
 }
 
+// listResponse es la respuesta de los listados de la discografía.
+type listResponse struct {
+	Count   int `json:"count"`
+	Results any `json:"results"`
+}
+
+// ArtistTracks: GET /api/v1/music/artists/{id}/tracks?limit=
+func (h *MusicHandler) ArtistTracks(w http.ResponseWriter, r *http.Request) {
+	limit, ok := parseLimit(w, r.URL.Query().Get("limit"), services.MaxSearchLimit)
+	if !ok {
+		return
+	}
+	tracks, err := h.music.ArtistTracks(r.Context(), chi.URLParam(r, "id"), limit)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, listResponse{Count: len(tracks), Results: tracks})
+}
+
+// ArtistAlbums: GET /api/v1/music/artists/{id}/albums?limit=
+func (h *MusicHandler) ArtistAlbums(w http.ResponseWriter, r *http.Request) {
+	limit, ok := parseLimit(w, r.URL.Query().Get("limit"), services.MaxSearchLimit)
+	if !ok {
+		return
+	}
+	albums, err := h.music.ArtistAlbums(r.Context(), chi.URLParam(r, "id"), limit)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, listResponse{Count: len(albums), Results: albums})
+}
+
 // Album: GET /api/v1/music/albums/{id} (UUID local o ID de Spotify), con
 // sus pistas.
 func (h *MusicHandler) Album(w http.ResponseWriter, r *http.Request) {
