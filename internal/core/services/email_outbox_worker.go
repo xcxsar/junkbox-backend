@@ -22,9 +22,9 @@ type EmailOutboxWorkerConfig struct {
 }
 
 // EmailOutboxWorker envía los correos de email_outbox. Cada lote se procesa
-// en una transacción: ClaimDueEmails bloquea las filas con SKIP LOCKED, así
-// que varias réplicas no envían el mismo correo. La entrega es "al menos una
-// vez": si el proceso muere entre el envío y el commit, el correo se reenvía.
+// en una transacción: ClaimDueEmails bloquea las filas hasta marcar el
+// resultado. La entrega es "al menos una vez": si el proceso muere entre el
+// envío y el commit, el correo se reenvía.
 type EmailOutboxWorker struct {
 	store  ports.OutboxStore
 	mailer ports.Mailer

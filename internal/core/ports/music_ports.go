@@ -46,13 +46,13 @@ type MusicMetadataProvider interface {
 }
 
 // EnrichmentStore son las queries del enriquecimiento con Spotify. Los
-// claims los usa solo el worker de respaldo.
+// filtros los usa solo el worker de respaldo.
 type EnrichmentStore interface {
 	UpdateArtistEnrichment(ctx context.Context, arg sqlc.UpdateArtistEnrichmentParams) (sql.NullString, error)
 	MarkArtistEnrichmentFailed(ctx context.Context, arg sqlc.MarkArtistEnrichmentFailedParams) error
 	MarkSongLinkFailed(ctx context.Context, arg sqlc.MarkSongLinkFailedParams) error
-	ClaimArtistsForEnrichment(ctx context.Context, arg sqlc.ClaimArtistsForEnrichmentParams) ([]sql.NullString, error)
-	ClaimSongsForLinking(ctx context.Context, arg sqlc.ClaimSongsForLinkingParams) ([]sql.NullString, error)
+	FilterArtistsForEnrichment(ctx context.Context, arg sqlc.FilterArtistsForEnrichmentParams) ([]sql.NullString, error)
+	FilterSongsForLinking(ctx context.Context, arg sqlc.FilterSongsForLinkingParams) ([]sql.NullString, error)
 }
 
 // EnrichmentQueue recibe lo que la búsqueda no alcanzó a completar dentro
@@ -78,7 +78,7 @@ type RetryAfterError interface {
 
 // EmbeddingStore son las queries del worker de embeddings.
 type EmbeddingStore interface {
-	ClaimPendingEmbeddingTracks(ctx context.Context, arg sqlc.ClaimPendingEmbeddingTracksParams) ([]sqlc.ClaimPendingEmbeddingTracksRow, error)
+	ListPendingEmbeddingTracks(ctx context.Context, arg sqlc.ListPendingEmbeddingTracksParams) ([]sqlc.ListPendingEmbeddingTracksRow, error)
 	UpdateSongAudioFeaturesAndEmbedding(ctx context.Context, arg sqlc.UpdateSongAudioFeaturesAndEmbeddingParams) (int64, error)
 	MarkEmbeddingAttemptFailed(ctx context.Context, arg sqlc.MarkEmbeddingAttemptFailedParams) error
 	GetCatalogFeatureMedians(ctx context.Context) (sqlc.GetCatalogFeatureMediansRow, error)

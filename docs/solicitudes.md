@@ -49,7 +49,7 @@ La validación de términos se hace antes que las demás, así que si la casilla
 
 - Migración `db/migrations/20261112000008_create_user_consents.sql`: tabla `user_consents (user_id, document, version, accepted_at)` con `document` ∈ {`terms`, `privacy`}. Se guarda una fila por documento para poder versionarlos por separado más adelante.
 - El usuario y sus consentimientos se insertan en **una sola transacción** (`internal/adapters/secondary/postgres/registration_tx.go`), así que no puede quedar una cuenta sin consentimiento registrado.
-- La versión sale de la variable `TERMS_VERSION` (default `"2026-11-12"`, máx. 50 caracteres), definida en `.env.template` y en `deploy/k8s/base/configmap.yaml`.
+- La versión sale de la variable `TERMS_VERSION` (default `"2026-11-12"`, máx. 50 caracteres), definida en `.env.template`.
 - Los usuarios del seed (cuentas internas del equipo) no tienen filas en `user_consents`.
 
 #### Qué tiene que hacer el frontend

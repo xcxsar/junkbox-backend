@@ -5,7 +5,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -135,9 +134,7 @@ func runServer(cmd *cobra.Command) {
 	// 5. Purga periódica de la denylist, los tokens de correo y el outbox.
 	go purgeRevokedTokens(ctx, queries)
 
-	// 6. Router y servidor HTTP con shutdown elegante. En Kubernetes el
-	// hostname es el nombre del pod: identifica la réplica que respondió.
-	instance, _ := os.Hostname()
+	// 6. Router y servidor HTTP con shutdown elegante.
 	handler := httpapi.NewRouter(httpapi.RouterOptions{
 		Auth:           httpapi.NewAuthHandler(authSvc, jwtManager),
 		Music:          httpapi.NewMusicHandler(musicSvc),
@@ -149,7 +146,6 @@ func runServer(cmd *cobra.Command) {
 		JWT:            jwtManager,
 		Revocation:     revocationChecker,
 		AllowedOrigins: cfg.CORSAllowedOrigins,
-		Instance:       instance,
 	})
 	srv := &http.Server{
 		Addr:              cfg.HTTPAddr,
@@ -158,7 +154,7 @@ func runServer(cmd *cobra.Command) {
 	}
 
 	go func() {
-		log.Printf("servidor HTTP escuchando en %s (instancia %s)", cfg.HTTPAddr, instance)
+		log.Printf("servidor HTTP escuchando en %s", cfg.HTTPAddr)
 		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			fatalf("http: %v", err)
 		}

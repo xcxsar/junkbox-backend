@@ -16,20 +16,10 @@ type Querier interface {
 	// ClaimArtistByName asigna el spotify_id a un artista del CSV homónimo
 	// (spotify_id NULL). No devuelve filas si no hay ninguno libre.
 	ClaimArtistByName(ctx context.Context, arg ClaimArtistByNameParams) (ClaimArtistByNameRow, error)
-	// Los claims los usa solo el worker de respaldo: reservan con un lease los
-	// pendientes cuyo reintento ya venció, para que otra réplica no los consulte
-	// a la vez. La búsqueda síncrona no reserva (su presupuesto es corto).
-	ClaimArtistsForEnrichment(ctx context.Context, arg ClaimArtistsForEnrichmentParams) ([]sql.NullString, error)
-	// ClaimDueEmails bloquea los pendientes vencidos; SKIP LOCKED evita que dos
-	// réplicas tomen el mismo correo.
+	// ClaimDueEmails bloquea los pendientes vencidos hasta que el worker marca
+	// el resultado en la misma transacción (SKIP LOCKED: no espera filas que
+	// otra transacción tenga bloqueadas).
 	ClaimDueEmails(ctx context.Context, limit int32) ([]ClaimDueEmailsRow, error)
-	// --- Worker de embeddings ---
-	// ClaimPendingEmbeddingTracks reserva los pendientes vencidos con un lease:
-	// adelanta next_embedding_attempt_at para que las demás réplicas no los
-	// tomen (SKIP LOCKED evita esperar a las que los están reservando). Si la
-	// réplica muere, otra los recoge cuando vence el lease.
-	ClaimPendingEmbeddingTracks(ctx context.Context, arg ClaimPendingEmbeddingTracksParams) ([]ClaimPendingEmbeddingTracksRow, error)
-	ClaimSongsForLinking(ctx context.Context, arg ClaimSongsForLinkingParams) ([]sql.NullString, error)
 	// ConsumeEmailToken marca el token como usado solo si sigue vigente; al ser
 	// un único UPDATE, dos peticiones concurrentes no pueden consumirlo dos veces.
 	ConsumeEmailToken(ctx context.Context, arg ConsumeEmailTokenParams) (uuid.UUID, error)
@@ -60,6 +50,11 @@ type Querier interface {
 	DeleteReview(ctx context.Context, id uuid.UUID) (int64, error)
 	EnqueueEmail(ctx context.Context, arg EnqueueEmailParams) error
 	ExistsUserByEmailOrUsername(ctx context.Context, arg ExistsUserByEmailOrUsernameParams) (bool, error)
+	// Los filtros los usa solo el worker de respaldo: de los IDs que recibió,
+	// devuelven los que aún hay que consultar (sin imagen o sin álbum, con
+	// intentos disponibles y con el reintento ya vencido).
+	FilterArtistsForEnrichment(ctx context.Context, arg FilterArtistsForEnrichmentParams) ([]sql.NullString, error)
+	FilterSongsForLinking(ctx context.Context, arg FilterSongsForLinkingParams) ([]sql.NullString, error)
 	// Seguir es idempotente: un segundo POST no falla.
 	FollowUser(ctx context.Context, arg FollowUserParams) error
 	GetAlbum(ctx context.Context, arg GetAlbumParams) (GetAlbumRow, error)
@@ -119,6 +114,8 @@ type Querier interface {
 	// ListFollowingFeed ("Siguiendo"): reseñas de los usuarios que sigue
 	// viewer_id, de la más nueva a la más antigua.
 	ListFollowingFeed(ctx context.Context, arg ListFollowingFeedParams) ([]ListFollowingFeedRow, error)
+	// --- Worker de embeddings ---
+	ListPendingEmbeddingTracks(ctx context.Context, arg ListPendingEmbeddingTracksParams) ([]ListPendingEmbeddingTracksRow, error)
 	// Feeds de reseñas de Inicio (HOME-04). Devuelven las mismas columnas que
 	// ListReviewsByTarget (reviews.sql). Paginan con keyset: se pide un
 	// elemento de más para saber si hay otra página, y el cursor es la última

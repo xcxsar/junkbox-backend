@@ -102,22 +102,6 @@ func TestRatingsYReviewsRequierenBearer(t *testing.T) {
 	}
 }
 
-func TestRouterIdentificaLaInstancia(t *testing.T) {
-	get := func(h http.Handler) *httptest.ResponseRecorder {
-		rec := httptest.NewRecorder()
-		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/healthz", nil))
-		return rec
-	}
-
-	rec := get(NewRouter(RouterOptions{Auth: &AuthHandler{}, Instance: "backend-2-abc"}))
-	if got := rec.Header().Get("X-Instance"); got != "backend-2-abc" {
-		t.Fatalf("X-Instance = %q, se esperaba backend-2-abc", got)
-	}
-	if rec := get(NewRouter(RouterOptions{Auth: &AuthHandler{}})); rec.Header().Get("X-Instance") != "" {
-		t.Fatalf("sin Instance no debía enviarse X-Instance")
-	}
-}
-
 func TestRutasSocialesRequierenBearer(t *testing.T) {
 	h := NewRouter(RouterOptions{Auth: &AuthHandler{}, Social: &SocialHandler{}})
 	id := "f5000000-0000-0000-0000-000000000001"

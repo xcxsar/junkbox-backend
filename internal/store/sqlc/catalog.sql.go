@@ -65,28 +65,26 @@ func (q *Queries) ClaimArtistByName(ctx context.Context, arg ClaimArtistByNamePa
 	return i, err
 }
 
-const claimArtistsForEnrichment = `-- name: ClaimArtistsForEnrichment :many
-UPDATE artists
-SET next_enrich_attempt_at = NOW() + make_interval(secs => $1::float8)
-WHERE spotify_id = ANY($2::text[])
+const filterArtistsForEnrichment = `-- name: FilterArtistsForEnrichment :many
+SELECT spotify_id
+FROM artists
+WHERE spotify_id = ANY($1::text[])
   AND image_url IS NULL
   AND enriched_at IS NULL
-  AND enrich_attempts < $3::int
+  AND enrich_attempts < $2::int
   AND (next_enrich_attempt_at IS NULL OR next_enrich_attempt_at <= NOW())
-RETURNING spotify_id
 `
 
-type ClaimArtistsForEnrichmentParams struct {
-	LeaseSeconds float64  `json:"lease_seconds"`
-	SpotifyIds   []string `json:"spotify_ids"`
-	MaxAttempts  int32    `json:"max_attempts"`
+type FilterArtistsForEnrichmentParams struct {
+	SpotifyIds  []string `json:"spotify_ids"`
+	MaxAttempts int32    `json:"max_attempts"`
 }
 
-// Los claims los usa solo el worker de respaldo: reservan con un lease los
-// pendientes cuyo reintento ya venció, para que otra réplica no los consulte
-// a la vez. La búsqueda síncrona no reserva (su presupuesto es corto).
-func (q *Queries) ClaimArtistsForEnrichment(ctx context.Context, arg ClaimArtistsForEnrichmentParams) ([]sql.NullString, error) {
-	rows, err := q.db.QueryContext(ctx, claimArtistsForEnrichment, arg.LeaseSeconds, pq.Array(arg.SpotifyIds), arg.MaxAttempts)
+// Los filtros los usa solo el worker de respaldo: de los IDs que recibió,
+// devuelven los que aún hay que consultar (sin imagen o sin álbum, con
+// intentos disponibles y con el reintento ya vencido).
+func (q *Queries) FilterArtistsForEnrichment(ctx context.Context, arg FilterArtistsForEnrichmentParams) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, filterArtistsForEnrichment, pq.Array(arg.SpotifyIds), arg.MaxAttempts)
 	if err != nil {
 		return nil, err
 	}
@@ -108,81 +106,22 @@ func (q *Queries) ClaimArtistsForEnrichment(ctx context.Context, arg ClaimArtist
 	return items, nil
 }
 
-const claimPendingEmbeddingTracks = `-- name: ClaimPendingEmbeddingTracks :many
-
-UPDATE song_metadata s
-SET next_embedding_attempt_at = NOW() + make_interval(secs => $1::float8)
-WHERE s.id IN (
-    SELECT p.id
-    FROM song_metadata p
-    WHERE p.pending_embedding = TRUE
-      AND p.embedding_attempts < $2::int
-      AND (p.next_embedding_attempt_at IS NULL OR p.next_embedding_attempt_at <= NOW())
-    ORDER BY p.next_embedding_attempt_at NULLS FIRST, p.id
-    LIMIT $3
-    FOR UPDATE SKIP LOCKED
-)
-RETURNING s.track_id, s.isrc, s.embedding_attempts
-`
-
-type ClaimPendingEmbeddingTracksParams struct {
-	LeaseSeconds float64 `json:"lease_seconds"`
-	MaxAttempts  int32   `json:"max_attempts"`
-	MaxResults   int32   `json:"max_results"`
-}
-
-type ClaimPendingEmbeddingTracksRow struct {
-	TrackID           sql.NullString `json:"track_id"`
-	Isrc              sql.NullString `json:"isrc"`
-	EmbeddingAttempts int32          `json:"embedding_attempts"`
-}
-
-// --- Worker de embeddings ---
-// ClaimPendingEmbeddingTracks reserva los pendientes vencidos con un lease:
-// adelanta next_embedding_attempt_at para que las demás réplicas no los
-// tomen (SKIP LOCKED evita esperar a las que los están reservando). Si la
-// réplica muere, otra los recoge cuando vence el lease.
-func (q *Queries) ClaimPendingEmbeddingTracks(ctx context.Context, arg ClaimPendingEmbeddingTracksParams) ([]ClaimPendingEmbeddingTracksRow, error) {
-	rows, err := q.db.QueryContext(ctx, claimPendingEmbeddingTracks, arg.LeaseSeconds, arg.MaxAttempts, arg.MaxResults)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	var items []ClaimPendingEmbeddingTracksRow
-	for rows.Next() {
-		var i ClaimPendingEmbeddingTracksRow
-		if err := rows.Scan(&i.TrackID, &i.Isrc, &i.EmbeddingAttempts); err != nil {
-			return nil, err
-		}
-		items = append(items, i)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return items, nil
-}
-
-const claimSongsForLinking = `-- name: ClaimSongsForLinking :many
-UPDATE song_metadata
-SET next_link_attempt_at = NOW() + make_interval(secs => $1::float8)
-WHERE track_id = ANY($2::text[])
+const filterSongsForLinking = `-- name: FilterSongsForLinking :many
+SELECT track_id
+FROM song_metadata
+WHERE track_id = ANY($1::text[])
   AND album_id IS NULL
-  AND link_attempts < $3::int
+  AND link_attempts < $2::int
   AND (next_link_attempt_at IS NULL OR next_link_attempt_at <= NOW())
-RETURNING track_id
 `
 
-type ClaimSongsForLinkingParams struct {
-	LeaseSeconds float64  `json:"lease_seconds"`
-	TrackIds     []string `json:"track_ids"`
-	MaxAttempts  int32    `json:"max_attempts"`
+type FilterSongsForLinkingParams struct {
+	TrackIds    []string `json:"track_ids"`
+	MaxAttempts int32    `json:"max_attempts"`
 }
 
-func (q *Queries) ClaimSongsForLinking(ctx context.Context, arg ClaimSongsForLinkingParams) ([]sql.NullString, error) {
-	rows, err := q.db.QueryContext(ctx, claimSongsForLinking, arg.LeaseSeconds, pq.Array(arg.TrackIds), arg.MaxAttempts)
+func (q *Queries) FilterSongsForLinking(ctx context.Context, arg FilterSongsForLinkingParams) ([]sql.NullString, error) {
+	rows, err := q.db.QueryContext(ctx, filterSongsForLinking, pq.Array(arg.TrackIds), arg.MaxAttempts)
 	if err != nil {
 		return nil, err
 	}
@@ -469,6 +408,52 @@ func (q *Queries) GetTrack(ctx context.Context, arg GetTrackParams) (GetTrackRow
 		&i.LinkAttempts,
 	)
 	return i, err
+}
+
+const listPendingEmbeddingTracks = `-- name: ListPendingEmbeddingTracks :many
+
+SELECT track_id, isrc, embedding_attempts
+FROM song_metadata
+WHERE pending_embedding = TRUE
+  AND embedding_attempts < $1::int
+  AND (next_embedding_attempt_at IS NULL OR next_embedding_attempt_at <= NOW())
+ORDER BY next_embedding_attempt_at NULLS FIRST, id
+LIMIT $2
+`
+
+type ListPendingEmbeddingTracksParams struct {
+	MaxAttempts int32 `json:"max_attempts"`
+	MaxResults  int32 `json:"max_results"`
+}
+
+type ListPendingEmbeddingTracksRow struct {
+	TrackID           sql.NullString `json:"track_id"`
+	Isrc              sql.NullString `json:"isrc"`
+	EmbeddingAttempts int32          `json:"embedding_attempts"`
+}
+
+// --- Worker de embeddings ---
+func (q *Queries) ListPendingEmbeddingTracks(ctx context.Context, arg ListPendingEmbeddingTracksParams) ([]ListPendingEmbeddingTracksRow, error) {
+	rows, err := q.db.QueryContext(ctx, listPendingEmbeddingTracks, arg.MaxAttempts, arg.MaxResults)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPendingEmbeddingTracksRow
+	for rows.Next() {
+		var i ListPendingEmbeddingTracksRow
+		if err := rows.Scan(&i.TrackID, &i.Isrc, &i.EmbeddingAttempts); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listTracksByAlbum = `-- name: ListTracksByAlbum :many

@@ -31,8 +31,9 @@ type ClaimDueEmailsRow struct {
 	Attempts  int32     `json:"attempts"`
 }
 
-// ClaimDueEmails bloquea los pendientes vencidos; SKIP LOCKED evita que dos
-// réplicas tomen el mismo correo.
+// ClaimDueEmails bloquea los pendientes vencidos hasta que el worker marca
+// el resultado en la misma transacción (SKIP LOCKED: no espera filas que
+// otra transacción tenga bloqueadas).
 func (q *Queries) ClaimDueEmails(ctx context.Context, limit int32) ([]ClaimDueEmailsRow, error) {
 	rows, err := q.db.QueryContext(ctx, claimDueEmails, limit)
 	if err != nil {

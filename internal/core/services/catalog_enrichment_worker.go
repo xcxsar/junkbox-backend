@@ -16,10 +16,9 @@ import (
 // los defaults de NewCatalogEnrichmentWorker.
 type CatalogEnrichmentWorkerConfig struct {
 	QueueSize       int           // capacidad del canal (default 5000)
-	BatchSize       int           // IDs reservados por vez (default 20)
+	BatchSize       int           // IDs filtrados por vez (default 20)
 	FlushInterval   time.Duration // procesa lo acumulado tras este tiempo (default 2s)
 	RequestInterval time.Duration // pausa entre llamadas a Spotify (default 250ms)
-	LeaseDuration   time.Duration // reserva frente a otras réplicas (default 5m)
 	ProviderPause   time.Duration // pausa ante un error del proveedor sin Retry-After (default 1m)
 }
 
@@ -35,9 +34,9 @@ type CatalogEnrichmentWorker struct {
 	queue    chan domain.EnrichmentJob
 
 	// Estado propio de la goroutine de Run.
-	buffer      map[domain.EnrichmentJob]bool      // deduplica lo que espera reserva
+	buffer      map[domain.EnrichmentJob]bool      // deduplica lo que espera filtrarse
 	order       []domain.EnrichmentJob             // orden de llegada de buffer
-	claimed     []domain.EnrichmentJob             // reservados, pendientes de consultar
+	ready       []domain.EnrichmentJob             // filtrados, pendientes de consultar
 	handled     map[domain.EnrichmentJob]time.Time // job → cuándo se procesó
 	pausedUntil time.Time
 
@@ -58,9 +57,6 @@ func NewCatalogEnrichmentWorker(enricher *CatalogEnricher, cfg CatalogEnrichment
 	}
 	if cfg.RequestInterval <= 0 {
 		cfg.RequestInterval = 250 * time.Millisecond
-	}
-	if cfg.LeaseDuration <= 0 {
-		cfg.LeaseDuration = 5 * time.Minute
 	}
 	if cfg.ProviderPause <= 0 {
 		cfg.ProviderPause = time.Minute
@@ -92,7 +88,7 @@ func (w *CatalogEnrichmentWorker) Enqueue(jobs ...domain.EnrichmentJob) {
 }
 
 // Run procesa la cola hasta que ctx se cancela. Lo pendiente al cancelarse
-// se descarta: sus reservas vencen y otra búsqueda lo volverá a pedir.
+// se descarta: otra búsqueda lo volverá a pedir.
 func (w *CatalogEnrichmentWorker) Run(ctx context.Context) {
 	flush := time.NewTicker(w.cfg.FlushInterval)
 	defer flush.Stop()
@@ -136,22 +132,22 @@ func (w *CatalogEnrichmentWorker) forgetHandled() {
 	}
 }
 
-// flush procesa los jobs reservados y reserva más hasta vaciar el búfer.
-// Se detiene si el proveedor pide una pausa; lo reservado queda para el
+// flush procesa los jobs filtrados y filtra más hasta vaciar el búfer. Se
+// detiene si el proveedor pide una pausa; lo filtrado queda para el
 // siguiente flush.
 func (w *CatalogEnrichmentWorker) flush(ctx context.Context) {
 	for ctx.Err() == nil && !time.Now().Before(w.pausedUntil) {
-		if len(w.claimed) == 0 {
+		if len(w.ready) == 0 {
 			if len(w.order) == 0 {
 				return
 			}
-			w.claimNext(ctx)
+			w.filterNext(ctx)
 			continue
 		}
-		if !w.process(ctx, w.claimed[0]) {
+		if !w.process(ctx, w.ready[0]) {
 			return
 		}
-		w.claimed = w.claimed[1:]
+		w.ready = w.ready[1:]
 		select {
 		case <-ctx.Done():
 			return
@@ -160,11 +156,11 @@ func (w *CatalogEnrichmentWorker) flush(ctx context.Context) {
 	}
 }
 
-// claimNext reserva hasta BatchSize jobs del búfer. Los que no se pueden
-// reservar (ya enriquecidos, sin intentos o reservados por otra réplica) se
-// descartan. Las canciones van primero porque pueden encadenar a su
+// filterNext toma hasta BatchSize jobs del búfer y se queda con los que aún
+// hay que consultar. Los demás (ya enriquecidos, sin intentos o con el
+// reintento sin vencer) se descartan. Las canciones van primero porque pueden encadenar a su
 // artista.
-func (w *CatalogEnrichmentWorker) claimNext(ctx context.Context) {
+func (w *CatalogEnrichmentWorker) filterNext(ctx context.Context) {
 	n := min(w.cfg.BatchSize, len(w.order))
 	var artistIDs, trackIDs []string
 	for _, j := range w.order[:n] {
@@ -179,29 +175,27 @@ func (w *CatalogEnrichmentWorker) claimNext(ctx context.Context) {
 
 	store := w.enricher.store
 	if len(trackIDs) > 0 {
-		ids, err := store.ClaimSongsForLinking(ctx, sqlc.ClaimSongsForLinkingParams{
-			LeaseSeconds: w.cfg.LeaseDuration.Seconds(),
-			TrackIds:     trackIDs,
-			MaxAttempts:  MaxEnrichAttempts,
+		ids, err := store.FilterSongsForLinking(ctx, sqlc.FilterSongsForLinkingParams{
+			TrackIds:    trackIDs,
+			MaxAttempts: MaxEnrichAttempts,
 		})
 		if err != nil {
-			log.Printf("worker de enriquecimiento: reservar canciones: %v", err)
+			log.Printf("worker de enriquecimiento: filtrar canciones: %v", err)
 		}
 		for _, id := range ids {
-			w.claimed = append(w.claimed, domain.EnrichmentJob{Kind: domain.EnrichTrack, SpotifyID: id.String})
+			w.ready = append(w.ready, domain.EnrichmentJob{Kind: domain.EnrichTrack, SpotifyID: id.String})
 		}
 	}
 	if len(artistIDs) > 0 {
-		ids, err := store.ClaimArtistsForEnrichment(ctx, sqlc.ClaimArtistsForEnrichmentParams{
-			LeaseSeconds: w.cfg.LeaseDuration.Seconds(),
-			SpotifyIds:   artistIDs,
-			MaxAttempts:  MaxEnrichAttempts,
+		ids, err := store.FilterArtistsForEnrichment(ctx, sqlc.FilterArtistsForEnrichmentParams{
+			SpotifyIds:  artistIDs,
+			MaxAttempts: MaxEnrichAttempts,
 		})
 		if err != nil {
-			log.Printf("worker de enriquecimiento: reservar artistas: %v", err)
+			log.Printf("worker de enriquecimiento: filtrar artistas: %v", err)
 		}
 		for _, id := range ids {
-			w.claimed = append(w.claimed, domain.EnrichmentJob{Kind: domain.EnrichArtist, SpotifyID: id.String})
+			w.ready = append(w.ready, domain.EnrichmentJob{Kind: domain.EnrichArtist, SpotifyID: id.String})
 		}
 	}
 }

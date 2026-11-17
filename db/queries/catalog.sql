@@ -209,48 +209,36 @@ SET link_attempts = CASE WHEN sqlc.arg(give_up)::bool THEN greatest(link_attempt
     next_link_attempt_at = NOW() + make_interval(secs => sqlc.arg(retry_base_seconds)::float8 * power(2, least(link_attempts, 10)))
 WHERE track_id = sqlc.arg(track_id) AND album_id IS NULL;
 
--- Los claims los usa solo el worker de respaldo: reservan con un lease los
--- pendientes cuyo reintento ya venció, para que otra réplica no los consulte
--- a la vez. La búsqueda síncrona no reserva (su presupuesto es corto).
--- name: ClaimArtistsForEnrichment :many
-UPDATE artists
-SET next_enrich_attempt_at = NOW() + make_interval(secs => sqlc.arg(lease_seconds)::float8)
+-- Los filtros los usa solo el worker de respaldo: de los IDs que recibió,
+-- devuelven los que aún hay que consultar (sin imagen o sin álbum, con
+-- intentos disponibles y con el reintento ya vencido).
+-- name: FilterArtistsForEnrichment :many
+SELECT spotify_id
+FROM artists
 WHERE spotify_id = ANY(sqlc.arg(spotify_ids)::text[])
   AND image_url IS NULL
   AND enriched_at IS NULL
   AND enrich_attempts < sqlc.arg(max_attempts)::int
-  AND (next_enrich_attempt_at IS NULL OR next_enrich_attempt_at <= NOW())
-RETURNING spotify_id;
+  AND (next_enrich_attempt_at IS NULL OR next_enrich_attempt_at <= NOW());
 
--- name: ClaimSongsForLinking :many
-UPDATE song_metadata
-SET next_link_attempt_at = NOW() + make_interval(secs => sqlc.arg(lease_seconds)::float8)
+-- name: FilterSongsForLinking :many
+SELECT track_id
+FROM song_metadata
 WHERE track_id = ANY(sqlc.arg(track_ids)::text[])
   AND album_id IS NULL
   AND link_attempts < sqlc.arg(max_attempts)::int
-  AND (next_link_attempt_at IS NULL OR next_link_attempt_at <= NOW())
-RETURNING track_id;
+  AND (next_link_attempt_at IS NULL OR next_link_attempt_at <= NOW());
 
 -- --- Worker de embeddings ---
 
--- ClaimPendingEmbeddingTracks reserva los pendientes vencidos con un lease:
--- adelanta next_embedding_attempt_at para que las demás réplicas no los
--- tomen (SKIP LOCKED evita esperar a las que los están reservando). Si la
--- réplica muere, otra los recoge cuando vence el lease.
--- name: ClaimPendingEmbeddingTracks :many
-UPDATE song_metadata s
-SET next_embedding_attempt_at = NOW() + make_interval(secs => sqlc.arg(lease_seconds)::float8)
-WHERE s.id IN (
-    SELECT p.id
-    FROM song_metadata p
-    WHERE p.pending_embedding = TRUE
-      AND p.embedding_attempts < sqlc.arg(max_attempts)::int
-      AND (p.next_embedding_attempt_at IS NULL OR p.next_embedding_attempt_at <= NOW())
-    ORDER BY p.next_embedding_attempt_at NULLS FIRST, p.id
-    LIMIT sqlc.arg(max_results)
-    FOR UPDATE SKIP LOCKED
-)
-RETURNING s.track_id, s.isrc, s.embedding_attempts;
+-- name: ListPendingEmbeddingTracks :many
+SELECT track_id, isrc, embedding_attempts
+FROM song_metadata
+WHERE pending_embedding = TRUE
+  AND embedding_attempts < sqlc.arg(max_attempts)::int
+  AND (next_embedding_attempt_at IS NULL OR next_embedding_attempt_at <= NOW())
+ORDER BY next_embedding_attempt_at NULLS FIRST, id
+LIMIT sqlc.arg(max_results);
 
 -- name: UpdateSongAudioFeaturesAndEmbedding :execrows
 UPDATE song_metadata

@@ -31,7 +31,6 @@ type AudioFeaturesWorkerConfig struct {
 	BatchSize      int           // canciones por petición al proveedor (default 50)
 	FlushInterval  time.Duration // envía un lote incompleto tras este tiempo (default 2s)
 	RescanInterval time.Duration // relee los pendientes de la BD (default 1m)
-	LeaseDuration  time.Duration // reserva de los pendientes frente a otras réplicas (default 5m)
 	MaxAttempts    int32         // intentos sin resultado antes de rendirse (default 5)
 	RetryBase      time.Duration // backoff tras un intento sin resultado: base·2^intentos (default 30s)
 	ProviderPause  time.Duration // pausa ante un error del proveedor sin Retry-After (default 1m)
@@ -74,9 +73,6 @@ func NewAudioFeaturesWorker(provider ports.AudioFeaturesProvider, store ports.Em
 	}
 	if cfg.RescanInterval <= 0 {
 		cfg.RescanInterval = time.Minute
-	}
-	if cfg.LeaseDuration <= 0 {
-		cfg.LeaseDuration = 5 * time.Minute
 	}
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = 5
@@ -187,11 +183,8 @@ func (w *AudioFeaturesWorker) loadMedians(ctx context.Context) bool {
 	return true
 }
 
-// rescan reserva y agrega al búfer las canciones pendientes cuyo reintento
-// ya venció (incluye las que quedaron de una ejecución anterior). La reserva
-// dura LeaseDuration para que otras réplicas no consulten las mismas: no se
-// reserva más mientras el proveedor está en pausa o el búfer ya tiene
-// trabajo, porque el lease vencería antes de enviarlas.
+// rescan agrega al búfer las canciones pendientes cuyo reintento ya venció
+// (incluye las que quedaron de una ejecución anterior).
 func (w *AudioFeaturesWorker) rescan(ctx context.Context) {
 	for id, at := range w.handled {
 		if time.Since(at) > handledTTL {
@@ -199,17 +192,12 @@ func (w *AudioFeaturesWorker) rescan(ctx context.Context) {
 		}
 	}
 
-	limit := w.cfg.BatchSize * 10
-	if time.Now().Before(w.pausedUntil) || len(w.order) >= limit {
-		return
-	}
-	rows, err := w.store.ClaimPendingEmbeddingTracks(ctx, sqlc.ClaimPendingEmbeddingTracksParams{
-		LeaseSeconds: w.cfg.LeaseDuration.Seconds(),
-		MaxAttempts:  w.cfg.MaxAttempts,
-		MaxResults:   int32(limit - len(w.order)),
+	rows, err := w.store.ListPendingEmbeddingTracks(ctx, sqlc.ListPendingEmbeddingTracksParams{
+		MaxAttempts: w.cfg.MaxAttempts,
+		MaxResults:  int32(w.cfg.BatchSize * 10),
 	})
 	if err != nil {
-		log.Printf("worker de embeddings: reservar pendientes: %v", err)
+		log.Printf("worker de embeddings: listar pendientes: %v", err)
 		return
 	}
 	for _, r := range rows {

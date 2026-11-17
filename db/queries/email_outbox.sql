@@ -2,8 +2,9 @@
 INSERT INTO email_outbox (to_address, subject, text_body, html_body)
 VALUES ($1, $2, $3, $4);
 
--- ClaimDueEmails bloquea los pendientes vencidos; SKIP LOCKED evita que dos
--- réplicas tomen el mismo correo.
+-- ClaimDueEmails bloquea los pendientes vencidos hasta que el worker marca
+-- el resultado en la misma transacción (SKIP LOCKED: no espera filas que
+-- otra transacción tenga bloqueadas).
 -- name: ClaimDueEmails :many
 SELECT id, to_address, subject, text_body, html_body, attempts
 FROM email_outbox

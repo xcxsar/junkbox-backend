@@ -96,18 +96,18 @@ func (f *fakeMetadata) calls() (artists, tracks int) {
 	return artists, tracks
 }
 
-// fakeEnrichStore registra las escrituras. Los claims devuelven solo los IDs
-// que no están en notClaimable.
+// fakeEnrichStore registra las escrituras. Los filtros devuelven solo los
+// IDs que no están en filteredOut.
 type fakeEnrichStore struct {
-	mu           sync.Mutex
-	enriched     map[string]sql.NullString // spotify_id → imagen guardada
-	artistFails  []string
-	songFails    []sqlc.MarkSongLinkFailedParams
-	notClaimable map[string]bool
+	mu          sync.Mutex
+	enriched    map[string]sql.NullString // spotify_id → imagen guardada
+	artistFails []string
+	songFails   []sqlc.MarkSongLinkFailedParams
+	filteredOut map[string]bool
 }
 
 func newFakeEnrichStore() *fakeEnrichStore {
-	return &fakeEnrichStore{enriched: map[string]sql.NullString{}, notClaimable: map[string]bool{}}
+	return &fakeEnrichStore{enriched: map[string]sql.NullString{}, filteredOut: map[string]bool{}}
 }
 
 func (f *fakeEnrichStore) UpdateArtistEnrichment(_ context.Context, arg sqlc.UpdateArtistEnrichmentParams) (sql.NullString, error) {
@@ -131,24 +131,24 @@ func (f *fakeEnrichStore) MarkSongLinkFailed(_ context.Context, arg sqlc.MarkSon
 	return nil
 }
 
-func (f *fakeEnrichStore) claim(ids []string) []sql.NullString {
+func (f *fakeEnrichStore) filter(ids []string) []sql.NullString {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	var out []sql.NullString
 	for _, id := range ids {
-		if !f.notClaimable[id] {
+		if !f.filteredOut[id] {
 			out = append(out, sql.NullString{String: id, Valid: true})
 		}
 	}
 	return out
 }
 
-func (f *fakeEnrichStore) ClaimArtistsForEnrichment(_ context.Context, arg sqlc.ClaimArtistsForEnrichmentParams) ([]sql.NullString, error) {
-	return f.claim(arg.SpotifyIds), nil
+func (f *fakeEnrichStore) FilterArtistsForEnrichment(_ context.Context, arg sqlc.FilterArtistsForEnrichmentParams) ([]sql.NullString, error) {
+	return f.filter(arg.SpotifyIds), nil
 }
 
-func (f *fakeEnrichStore) ClaimSongsForLinking(_ context.Context, arg sqlc.ClaimSongsForLinkingParams) ([]sql.NullString, error) {
-	return f.claim(arg.TrackIds), nil
+func (f *fakeEnrichStore) FilterSongsForLinking(_ context.Context, arg sqlc.FilterSongsForLinkingParams) ([]sql.NullString, error) {
+	return f.filter(arg.TrackIds), nil
 }
 
 type fakeEnrichQueue struct {
@@ -188,11 +188,11 @@ func newWorkerFixture() *workerFixture {
 
 // --- worker de respaldo ---
 
-func TestEnrichmentWorkerSoloConsultaLoReservado(t *testing.T) {
+func TestEnrichmentWorkerSoloConsultaLoQuePasaElFiltro(t *testing.T) {
 	f := newWorkerFixture()
 	f.metadata.artists[artistA] = domain.ImportedArtist{SpotifyID: artistA, ImageURL: strp("a.jpg")}
 	f.metadata.artists[artistB] = domain.ImportedArtist{SpotifyID: artistB, ImageURL: strp("b.jpg")}
-	f.store.notClaimable[artistB] = true // ya enriquecido u otra réplica lo tiene
+	f.store.filteredOut[artistB] = true // ya enriquecido: no pasa el filtro
 
 	f.worker.add(domain.EnrichmentJob{Kind: domain.EnrichArtist, SpotifyID: artistA})
 	f.worker.add(domain.EnrichmentJob{Kind: domain.EnrichArtist, SpotifyID: artistB})
@@ -204,8 +204,8 @@ func TestEnrichmentWorkerSoloConsultaLoReservado(t *testing.T) {
 	if got := f.store.enriched[artistA]; got.String != "a.jpg" {
 		t.Fatalf("imagen guardada = %+v", got)
 	}
-	if len(f.worker.order) != 0 || len(f.worker.claimed) != 0 {
-		t.Fatalf("debía vaciar el búfer: order=%v claimed=%v", f.worker.order, f.worker.claimed)
+	if len(f.worker.order) != 0 || len(f.worker.ready) != 0 {
+		t.Fatalf("debía vaciar el búfer: order=%v ready=%v", f.worker.order, f.worker.ready)
 	}
 }
 
@@ -243,8 +243,8 @@ func TestEnrichmentWorkerPausaAnteRateLimit(t *testing.T) {
 	if time.Until(f.worker.pausedUntil) < 50*time.Second {
 		t.Fatalf("debía pausar según Retry-After: %v", f.worker.pausedUntil)
 	}
-	if len(f.worker.claimed) != 2 {
-		t.Fatalf("los reservados deben quedar para después: %v", f.worker.claimed)
+	if len(f.worker.ready) != 2 {
+		t.Fatalf("los filtrados deben quedar para después: %v", f.worker.ready)
 	}
 	if len(f.store.artistFails) != 0 {
 		t.Fatalf("un 429 no debe consumir intentos: %v", f.store.artistFails)
@@ -275,8 +275,8 @@ func TestEnrichmentWorkerErrorDelProveedorRegistraIntento(t *testing.T) {
 	if len(f.store.artistFails) != 1 || f.store.artistFails[0] != artistA {
 		t.Fatalf("debía registrar el intento fallido: %v", f.store.artistFails)
 	}
-	if f.worker.pausedUntil.IsZero() || len(f.worker.claimed) != 0 {
-		t.Fatalf("debía pausar y descartar el job: paused=%v claimed=%v", f.worker.pausedUntil, f.worker.claimed)
+	if f.worker.pausedUntil.IsZero() || len(f.worker.ready) != 0 {
+		t.Fatalf("debía pausar y descartar el job: paused=%v ready=%v", f.worker.pausedUntil, f.worker.ready)
 	}
 }
 
