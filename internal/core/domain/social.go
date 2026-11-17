@@ -48,6 +48,20 @@ type FollowEntry struct {
 	FollowedByMe bool      `json:"followed_by_me"`
 }
 
+// UserSearchResult es la respuesta de GET /users/search (SEARCH-04).
+type UserSearchResult struct {
+	Query   string            `json:"query"`
+	Count   int               `json:"count"`
+	Results []UserSearchEntry `json:"results"`
+}
+
+// UserSearchEntry es un usuario encontrado; FollowedByMe es si quien busca
+// ya lo sigue.
+type UserSearchEntry struct {
+	ReviewAuthor
+	FollowedByMe bool `json:"followed_by_me"`
+}
+
 // FollowPage es la respuesta de GET /users/{id}/followers y /following.
 type FollowPage struct {
 	UserID     uuid.UUID     `json:"user_id"`

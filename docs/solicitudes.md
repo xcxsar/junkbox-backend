@@ -810,3 +810,82 @@ Es un cambio aditivo: ningún campo cambia de nombre ni de tipo.
 - `go test ./...`: `TestSearchTraeCalificaciones` (los tres tipos, con y sin calificaciones), `TestDiscografiaYPistasTraenCalificaciones`, `TestGetTrackTraeCalificaciones`, `TestHomeTraeCalificaciones` y `TestSummarizeTargetCancionCompletaCaratula`, que ahora comprueba que el resumen sale sin `ratings`.
 - Integración (`make test-db`): `TestImportTraeLasCalificacionesExistentes` (`internal/adapters/secondary/postgres/catalog_importer_test.go`). Importa una canción, la califica junto con su álbum y su artista, la vuelve a importar y comprueba que `ImportTracks`, `ImportAlbums` e `ImportArtists` devuelven esas calificaciones, que es el camino del respaldo de Spotify y de completar álbumes. Sin la lectura de `ratings_count`/`avg_rating` en el importador, la prueba falla.
 - Prueba manual contra el servidor local con un usuario temporal que calificó "Olympique" (4,5), el álbum "BBO" (4) y al artista Hoke (5): las tres aparecen con sus `ratings` en la búsqueda, la discografía, el detalle del álbum y sus pistas; los elementos sin calificar salen con `{"count": 0, "average": null}` (también en `/home`); y el `target.summary` de una reseña salió sin `ratings`. Las calificaciones, la reseña y el usuario de prueba se borraron, y las estadísticas volvieron a 0.
+
+---
+
+### SEARCH-04 · Búsqueda de usuarios
+
+- **Estado:** Resuelta · **Fecha:** 2026-11-17
+- **Responsable:** Backend y Producto
+
+#### Qué se pidió
+
+La pestaña "Usuarios" del Buscador no tenía endpoint (el frontend la mostraba deshabilitada). Se pidió `GET /api/v1/users/search?q=&limit=` → `{ results: [ { id, username, display_name, avatar_url } ] }`.
+
+#### Decisión
+
+Decisiones de producto tomadas el 2026-11-17:
+
+| Tema | Decisión |
+| --- | --- |
+| Cómo coincide | Prefijo + trigramas, sin tildes ni mayúsculas: el comienzo del username, el comienzo de cualquier palabra del nombre visible ("beltran" → "César David Beltrán Loredo") o de forma aproximada, que tolera erratas ("Raymundo Sanches" → `raymundo_sanchez`) |
+| Orden | Username exacto → comienzo del username → comienzo de una palabra del nombre → parecido → más seguidores |
+| Campos | Los pedidos más `followed_by_me`, para el botón Seguir/Siguiendo (igual que las listas de seguidores) |
+| Quien busca | Se excluye de los resultados |
+| Correo sin verificar | Se incluyen todos los usuarios, como en perfiles, sugerencias y feeds |
+
+Implementación:
+- Migración `20261117000015_users_search.sql`: índice GIN de trigramas sobre `lower(f_unaccent(username || ' ' || display_name))`, que sirve para los prefijos y para la coincidencia aproximada.
+- Consulta `SearchUsers` (`db/queries/social.sql`): `%`, `_` y `\` en `q` se tratan como texto literal.
+
+#### Contrato de la API
+
+`GET /api/v1/users/search?q=&limit=` (requiere JWT): `q` es obligatoria (hasta 100 caracteres) y `limit` va de 1 a 50 (por defecto 20).
+
+```json
+{
+  "query": "beltran",
+  "count": 1,
+  "results": [
+    {
+      "id": "b1000000-0000-0000-0000-000000000001",
+      "username": "cesar_beltran",
+      "display_name": "César David Beltrán Loredo",
+      "avatar_url": null,
+      "followed_by_me": false
+    }
+  ]
+}
+```
+
+| Caso | Respuesta |
+| --- | --- |
+| Sin coincidencias | `200` con `results: []` |
+| `q` vacía o de más de 100 caracteres, `limit` fuera de 1–50 | `400` |
+| Sin token | `401` |
+
+`query` y `count` se añaden por coherencia con `/music/search` (aditivo). El username `search` queda accesible solo por UUID en `/users/{id}`, igual que `suggestions`. Los usernames válidos admiten letras, números, `_` y `.`, así que alguien podría registrarlo.
+
+#### Qué tiene que hacer el frontend
+
+1. Habilitar la pestaña "Usuarios" y llamar a `/users/search` con la misma consulta del Buscador.
+2. Usar `followed_by_me` para mostrar "Seguir"/"Siguiendo" en cada fila. Seguir o dejar de seguir sigue siendo `POST`/`DELETE /users/{id}/follow`.
+3. Mostrar el avatar por defecto cuando `avatar_url` sea `null`.
+
+#### Pendiente / fuera de alcance
+
+- No hay paginación por cursor; `limit` llega hasta 50.
+- Con 1–2 caracteres el índice no se usa y se recorre `users`, lo que es aceptable mientras haya pocos usuarios.
+- Con palabras cortas la tolerancia a erratas es menor: "garsia" no encuentra "García" (puntaje 0,40 < 0,5), "montserat" sí encuentra "Montserrat" (0,75).
+
+#### Verificación
+
+- `go test ./...`: `TestSearchUsersMapeaYPasaElViewer`, `TestSearchUsersSinResultadosDevuelveListaVacia` y `TestSearchUsersValidaciones` (`social_service_test.go`).
+- `make test-db`: `TestSearchUsersContraPostgres` (`internal/adapters/secondary/postgres/users_search_test.go`) crea usuarios temporales y comprueba:
+  - el orden y la exclusión de quien busca;
+  - `followed_by_me`;
+  - que no distingue tildes ni mayúsculas;
+  - que tolera erratas;
+  - que `%`, `_` y `\` no coinciden con nadie. Sin el escape, "%" devolvía a todos los usuarios: comprobado quitándolo a propósito.
+- `EXPLAIN`: la consulta usa `idx_users_search_trgm`.
+- Prueba manual contra el servidor local con el usuario `xcxsar`: "cesar_beltran", "ce" y "beltran" → `cesar_beltran`; "sanchez" y "Raymundo Sanches" → `raymundo_sanchez`; "xcxsar" (uno mismo) → `[]`; `q` vacía → `400`. Respuestas en 20–40 ms.

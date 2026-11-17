@@ -21,6 +21,7 @@ type SocialStore interface {
 	UnfollowUser(ctx context.Context, arg sqlc.UnfollowUserParams) error
 	ListFollowers(ctx context.Context, arg sqlc.ListFollowersParams) ([]sqlc.ListFollowersRow, error)
 	ListFollowing(ctx context.Context, arg sqlc.ListFollowingParams) ([]sqlc.ListFollowingRow, error)
+	SearchUsers(ctx context.Context, arg sqlc.SearchUsersParams) ([]sqlc.SearchUsersRow, error)
 	LikeReview(ctx context.Context, arg sqlc.LikeReviewParams) error
 	UnlikeReview(ctx context.Context, arg sqlc.UnlikeReviewParams) error
 	GetReviewLikesCount(ctx context.Context, id uuid.UUID) (int32, error)

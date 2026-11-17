@@ -97,9 +97,11 @@ func NewRouter(opts RouterOptions) http.Handler {
 			}
 			if opts.Social != nil {
 				r.Get("/feed", opts.Social.Feed)
-				// Ruta fija antes que /users/{id}: chi la prefiere, así que el
-				// username "suggestions" solo es accesible por UUID.
+				// Rutas fijas antes que /users/{id}: chi las prefiere, así que
+				// los usernames "suggestions" y "search" solo son accesibles
+				// por UUID.
 				r.Get("/users/suggestions", opts.Social.Suggestions)
+				r.Get("/users/search", opts.Social.SearchUsers)
 				r.Get("/users/{id}", opts.Social.Profile)
 				r.Post("/users/{id}/follow", opts.Social.Follow)
 				r.Delete("/users/{id}/follow", opts.Social.Unfollow)

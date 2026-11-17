@@ -66,6 +66,26 @@ func (h *SocialHandler) Suggestions(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, page)
 }
 
+// SearchUsers: GET /api/v1/users/search?q=&limit=
+func (h *SocialHandler) SearchUsers(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "no autorizado")
+		return
+	}
+	q := r.URL.Query()
+	limit, ok := parseLimit(w, q.Get("limit"), services.MaxUserSearchLimit)
+	if !ok {
+		return
+	}
+	result, err := h.social.SearchUsers(r.Context(), claims.UserID, q.Get("q"), limit)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 // Profile: GET /api/v1/users/{id} (UUID o username)
 func (h *SocialHandler) Profile(w http.ResponseWriter, r *http.Request) {
 	h.profileAction(w, r, h.social.Profile)

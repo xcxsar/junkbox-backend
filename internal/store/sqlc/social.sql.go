@@ -248,6 +248,80 @@ func (q *Queries) ListFollowing(ctx context.Context, arg ListFollowingParams) ([
 	return items, nil
 }
 
+const searchUsers = `-- name: SearchUsers :many
+WITH input AS (
+    SELECT lower(f_unaccent($3::text)) AS q
+), pattern AS (
+    SELECT q, replace(replace(replace(q, '\', '\\'), '%', '\%'), '_', '\_') AS p
+    FROM input
+)
+SELECT
+    u.id, u.username, u.display_name, u.avatar_url,
+    EXISTS (SELECT 1 FROM follows v WHERE v.follower_id = $1 AND v.followee_id = u.id)::bool AS followed_by_me
+FROM users u
+CROSS JOIN pattern
+WHERE u.id <> $1
+  AND (lower(f_unaccent(u.username || ' ' || coalesce(u.display_name, ''))) LIKE pattern.p || '%'
+       OR lower(f_unaccent(u.username || ' ' || coalesce(u.display_name, ''))) LIKE '% ' || pattern.p || '%'
+       OR pattern.q <<% lower(f_unaccent(u.username || ' ' || coalesce(u.display_name, ''))))
+ORDER BY
+    (u.username = pattern.q) DESC,
+    (u.username LIKE pattern.p || '%') DESC,
+    (lower(f_unaccent(u.username || ' ' || coalesce(u.display_name, ''))) LIKE '% ' || pattern.p || '%') DESC,
+    strict_word_similarity(pattern.q, lower(f_unaccent(u.username || ' ' || coalesce(u.display_name, '')))) DESC,
+    (SELECT count(*) FROM follows f WHERE f.followee_id = u.id) DESC,
+    u.username
+LIMIT $2::int
+`
+
+type SearchUsersParams struct {
+	ViewerID   uuid.UUID `json:"viewer_id"`
+	MaxResults int32     `json:"max_results"`
+	Query      string    `json:"query"`
+}
+
+type SearchUsersRow struct {
+	ID           uuid.UUID      `json:"id"`
+	Username     string         `json:"username"`
+	DisplayName  sql.NullString `json:"display_name"`
+	AvatarUrl    sql.NullString `json:"avatar_url"`
+	FollowedByMe bool           `json:"followed_by_me"`
+}
+
+// SearchUsers (SEARCH-04) busca por username y nombre visible sin tildes ni
+// mayúsculas; t es la expresión de idx_users_search_trgm. Coincide por
+// prefijo del username, prefijo de una palabra del nombre ("gar" → "Lily
+// García") o de forma aproximada (<<%, tolera erratas). p es la consulta
+// con %, _ y \ escapados para LIKE. Excluye a viewer_id.
+func (q *Queries) SearchUsers(ctx context.Context, arg SearchUsersParams) ([]SearchUsersRow, error) {
+	rows, err := q.db.QueryContext(ctx, searchUsers, arg.ViewerID, arg.MaxResults, arg.Query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []SearchUsersRow
+	for rows.Next() {
+		var i SearchUsersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Username,
+			&i.DisplayName,
+			&i.AvatarUrl,
+			&i.FollowedByMe,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const unfollowUser = `-- name: UnfollowUser :exec
 DELETE FROM follows
 WHERE follower_id = $1 AND followee_id = $2

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -19,6 +20,10 @@ type fakeSocial struct {
 	likes   map[[2]uuid.UUID]bool
 	reviews map[uuid.UUID]bool
 	lastArg sqlc.GetPublicProfileParams
+
+	// Búsqueda de usuarios: lo que devuelve y con qué se llamó.
+	searchRows  []sqlc.SearchUsersRow
+	searchCalls []sqlc.SearchUsersParams
 }
 
 func newFakeSocial() *fakeSocial {
@@ -63,6 +68,11 @@ func (f *fakeSocial) ListFollowers(_ context.Context, arg sqlc.ListFollowersPara
 
 func (f *fakeSocial) ListFollowing(_ context.Context, _ sqlc.ListFollowingParams) ([]sqlc.ListFollowingRow, error) {
 	return nil, nil
+}
+
+func (f *fakeSocial) SearchUsers(_ context.Context, arg sqlc.SearchUsersParams) ([]sqlc.SearchUsersRow, error) {
+	f.searchCalls = append(f.searchCalls, arg)
+	return f.searchRows, nil
 }
 
 func (f *fakeSocial) LikeReview(_ context.Context, arg sqlc.LikeReviewParams) error {
@@ -161,5 +171,68 @@ func TestLikeEsIdempotenteYDevuelveElConteo(t *testing.T) {
 	}
 	if _, err := svc.Like(context.Background(), me, uuid.New()); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("reseña inexistente: esperaba ErrNotFound, obtuve %v", err)
+	}
+}
+
+// --- búsqueda de usuarios (SEARCH-04) ---
+
+func TestSearchUsersMapeaYPasaElViewer(t *testing.T) {
+	store := newFakeSocial()
+	me, other := uuid.New(), uuid.New()
+	store.searchRows = []sqlc.SearchUsersRow{{
+		ID: other, Username: "lily_g",
+		DisplayName:  sql.NullString{String: "Lily García", Valid: true},
+		FollowedByMe: true,
+	}}
+
+	res, err := NewSocialService(store).SearchUsers(context.Background(), me, "  garcia ", 0)
+	if err != nil {
+		t.Fatalf("SearchUsers: %v", err)
+	}
+	if len(store.searchCalls) != 1 || store.searchCalls[0] != (sqlc.SearchUsersParams{ViewerID: me, Query: "garcia", MaxResults: DefaultUserSearchLimit}) {
+		t.Fatalf("consulta inesperada: %+v", store.searchCalls)
+	}
+	if res.Query != "garcia" || res.Count != 1 {
+		t.Fatalf("resultado inesperado: %+v", res)
+	}
+	u := res.Results[0]
+	if u.ID != other || u.Username != "lily_g" || u.DisplayName == nil || *u.DisplayName != "Lily García" || u.AvatarURL != nil || !u.FollowedByMe {
+		t.Fatalf("usuario mal mapeado: %+v", u)
+	}
+}
+
+func TestSearchUsersSinResultadosDevuelveListaVacia(t *testing.T) {
+	res, err := NewSocialService(newFakeSocial()).SearchUsers(context.Background(), uuid.New(), "nadie", 5)
+	if err != nil {
+		t.Fatalf("SearchUsers: %v", err)
+	}
+	if res.Count != 0 || res.Results == nil {
+		t.Fatalf("debía ser una lista vacía (no null): %+v", res)
+	}
+}
+
+func TestSearchUsersValidaciones(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		limit int
+	}{
+		{"q vacía", "   ", 0},
+		{"q demasiado larga", strings.Repeat("a", maxUserQueryLen+1), 0},
+		{"limit negativo", "lily", -1},
+		{"limit excesivo", "lily", MaxUserSearchLimit + 1},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			store := newFakeSocial()
+			_, err := NewSocialService(store).SearchUsers(context.Background(), uuid.New(), c.query, c.limit)
+			var v *domain.ValidationError
+			if !errors.As(err, &v) {
+				t.Fatalf("err = %v, se esperaba ValidationError", err)
+			}
+			if len(store.searchCalls) != 0 {
+				t.Fatal("no debía consultar la base")
+			}
+		})
 	}
 }

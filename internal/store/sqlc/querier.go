@@ -240,6 +240,12 @@ type Querier interface {
 	// album_id, link_attempts y los campos artist_* (salvo la imagen) no se
 	// exponen: el servicio los usa para decidir qué completar con Spotify.
 	SearchTracksTrigram(ctx context.Context, arg SearchTracksTrigramParams) ([]SearchTracksTrigramRow, error)
+	// SearchUsers (SEARCH-04) busca por username y nombre visible sin tildes ni
+	// mayúsculas; t es la expresión de idx_users_search_trgm. Coincide por
+	// prefijo del username, prefijo de una palabra del nombre ("gar" → "Lily
+	// García") o de forma aproximada (<<%, tolera erratas). p es la consulta
+	// con %, _ y \ escapados para LIKE. Excluye a viewer_id.
+	SearchUsers(ctx context.Context, arg SearchUsersParams) ([]SearchUsersRow, error)
 	SetRefreshTokenReplacedBy(ctx context.Context, arg SetRefreshTokenReplacedByParams) error
 	// SoftDeleteComment deja el raíz como "comentario eliminado".
 	SoftDeleteComment(ctx context.Context, id uuid.UUID) (int64, error)

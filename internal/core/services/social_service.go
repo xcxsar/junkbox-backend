@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 
@@ -13,8 +15,15 @@ import (
 	"github.com/xcxsar/junkbox-backend/internal/store/sqlc"
 )
 
+// Límites de la búsqueda de usuarios (SEARCH-04).
+const (
+	DefaultUserSearchLimit = 20
+	MaxUserSearchLimit     = 50
+	maxUserQueryLen        = 100
+)
+
 // SocialService implementa el perfil público, los seguidores y los Me gusta
-// de reseñas (HOME-04).
+// de reseñas (HOME-04), y la búsqueda de usuarios (SEARCH-04).
 type SocialService struct {
 	store ports.SocialStore
 }
@@ -22,6 +31,38 @@ type SocialService struct {
 // NewSocialService crea el servicio.
 func NewSocialService(store ports.SocialStore) *SocialService {
 	return &SocialService{store: store}
+}
+
+// SearchUsers busca usuarios por username o nombre visible, sin tildes ni
+// mayúsculas, sin incluir a viewerID. El orden y la coincidencia están en
+// la consulta SearchUsers. limit = 0 usa DefaultUserSearchLimit.
+func (s *SocialService) SearchUsers(ctx context.Context, viewerID uuid.UUID, query string, limit int) (*domain.UserSearchResult, error) {
+	query = strings.TrimSpace(query)
+	if query == "" {
+		return nil, domain.NewValidationError("q es requerido")
+	}
+	if utf8.RuneCountInString(query) > maxUserQueryLen {
+		return nil, domain.NewValidationError(fmt.Sprintf("q no puede exceder %d caracteres", maxUserQueryLen))
+	}
+	if limit == 0 {
+		limit = DefaultUserSearchLimit
+	}
+	if limit < 1 || limit > MaxUserSearchLimit {
+		return nil, domain.NewValidationError(fmt.Sprintf("limit debe estar entre 1 y %d", MaxUserSearchLimit))
+	}
+
+	rows, err := s.store.SearchUsers(ctx, sqlc.SearchUsersParams{ViewerID: viewerID, Query: query, MaxResults: int32(limit)})
+	if err != nil {
+		return nil, fmt.Errorf("social: buscar usuarios: %w", err)
+	}
+	out := &domain.UserSearchResult{Query: query, Count: len(rows), Results: make([]domain.UserSearchEntry, len(rows))}
+	for i, r := range rows {
+		out.Results[i] = domain.UserSearchEntry{
+			ReviewAuthor: domain.ReviewAuthor{ID: r.ID, Username: r.Username, DisplayName: stringPtr(r.DisplayName), AvatarURL: stringPtr(r.AvatarUrl)},
+			FollowedByMe: r.FollowedByMe,
+		}
+	}
+	return out, nil
 }
 
 // Profile devuelve el perfil público de un usuario (UUID o username) visto

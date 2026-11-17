@@ -1348,6 +1348,42 @@ curl -s "http://localhost:8080/api/v1/users/suggestions?limit=5" \
 
 ---
 
+#### 29. Búsqueda de Usuarios (`GET /api/v1/users/search?q=&limit=`)
+Busca usuarios por `username` o nombre visible (`display_name`), sin distinguir mayúsculas ni tildes. Encuentra:
+- el username completo o su comienzo ("ce" → `cesar_beltran`);
+- el comienzo de cualquier palabra del nombre ("beltran" → "César David Beltrán Loredo");
+- coincidencias aproximadas con erratas ("Raymundo Sanches" → `raymundo_sanchez`). Con palabras cortas la tolerancia es menor.
+
+Orden: username exacto, comienzo del username, comienzo de una palabra del nombre, parecido y, a igualdad, quien tiene más seguidores. Quien busca no aparece en los resultados. Se incluyen todos los usuarios, hayan verificado su correo o no.
+
+**Parámetros:** `q` (obligatorio, hasta 100 caracteres) y `limit` (1 a 50, por defecto 20). `q` vacía o fuera de rango → `400`.
+
+```bash
+curl -i "http://localhost:8080/api/v1/users/search?q=beltran" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+**Respuesta (`200 OK`):**
+```json
+{
+  "query": "beltran",
+  "count": 1,
+  "results": [
+    {
+      "id": "b1000000-0000-0000-0000-000000000001",
+      "username": "cesar_beltran",
+      "display_name": "César David Beltrán Loredo",
+      "avatar_url": null,
+      "followed_by_me": false
+    }
+  ]
+}
+```
+
+`followed_by_me` permite mostrar "Seguir" o "Siguiendo" en la fila sin pedir el perfil. Sin coincidencias, `results` es `[]`.
+
+---
+
 ### Formato Estándar de Errores
 
 Todas las respuestas con error devuelven formato JSON uniforme:
