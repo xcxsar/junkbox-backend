@@ -320,3 +320,38 @@ Reseñas (`POST`/`GET`/`PUT /api/v1/reviews…`):
 
 - `go test ./...`: casos nuevos en `music_service_test.go` (`TestGetTrackEnlazaCancionDelCSVConSuAlbum`, `TestGetTrackYaEnlazadaNoConsultaSpotify`, `TestGetTrackSinSpotifyRespondeLoDelCatalogo`, `TestGetTrackRespetaElPresupuestoYDelegaAlWorker`, `TestResolveTargetNoConsultaSpotify`, `TestSummarizeTarget*`, `TestGetArtistYaEnriquecidoNoConsultaSpotify`) y en `review_service_test.go` (`TestReviewTraeElResumenDeSuObjetivo`, `TestListReviewsResumeElObjetivoUnaVez`, `TestReviewObjetivoInexistenteSaleSinResumen`, `TestReviewErrorAlResumirSePropaga`).
 - Prueba manual contra el servidor local: `GET /music/tracks/1` (canción del CSV sin álbum) respondió con carátula, `album_id` y `album_title` en ≈0,8 s; la segunda lectura, en ≈40 ms sin llamar a Spotify. Calificar la canción `3` (sin álbum) no la enlazó. Reseñar después esa canción, un álbum y un artista sin foto devolvió los tres resúmenes con imagen (la canción quedó enlazada y la foto del artista guardada); `GET /reviews` de la canción respondió en ≈35 ms con el resumen en la página y en la reseña. Las respuestas de calificaciones no cambiaron. Las calificaciones y reseñas de prueba se borraron.
+
+---
+
+### HOME-03 · Detalle de varias canciones en una llamada
+
+- **Estado:** No necesaria (cerrada) · **Fecha:** 2026-11-16
+- **Responsable:** Backend
+
+#### Qué se pidió
+
+La plantilla de Inicio hacía una petición `GET /music/tracks/{id}` por canción (unas 12). Se pidió `GET /api/v1/music/tracks?ids=<id1>,<id2>,…` (hasta unos 50 IDs, locales o de Spotify) → `200 { "results": [TrackSummary…] }`, omitiendo los IDs que no existan y con `400` si la lista está vacía o es demasiado larga. La propia solicitud indicaba que dejaba de importar si HOME-01 devolvía los datos completos.
+
+#### Decisión
+
+No se implementa: después de HOME-01 y HOME-02 ya no hay ninguna pantalla que tenga que resolver una lista de IDs de canciones.
+
+- **Inicio:** `GET /api/v1/home` (HOME-01) devuelve en una sola llamada `sections[0].items`. Cada elemento es `type` más **el mismo objeto `TrackSummary`** que devuelven la búsqueda y el detalle, con `album_image_url` y `artist_image_url` ya completados. La plantilla de 8 IDs, sus `GET /music/tracks/{id}` y las llamadas de álbum de la alternativa de HOME-02 dejan de hacer falta. Eso cubre las ~12 peticiones.
+- **Reseñas:** desde HOME-02, cada reseña trae `target.summary`, así que `ReviewCard` tampoco tiene que pedir canciones.
+- **Resto de la API:** la búsqueda, el detalle de álbum (con sus pistas), `/home` y las reseñas ya devuelven los objetos completos. Ningún endpoint devuelve solo IDs de canciones.
+- **Costo:** cada ID sin carátula puede requerir enlazar la canción con Spotify (una llamada por ID, porque Development Mode ya no tiene endpoints por lotes). Con 50 IDs serían hasta 50–100 llamadas dentro del presupuesto de 2 s, o habría que responder sin imágenes. Sin un caso de uso real, no compensa.
+
+#### Qué tiene que hacer el frontend
+
+1. En Inicio, usar `GET /api/v1/home` (HOME-01) y quitar las peticiones en paralelo a `/music/tracks/{id}` de la plantilla.
+2. En `ReviewCard`, usar `review.target.summary` (HOME-02).
+3. La renovación única y compartida del token sigue siendo buena práctica, pero ya no se dispara por estas ráfagas de peticiones.
+
+#### Cuándo retomarla
+
+Si aparece una pantalla que guarde listas de canciones por ID (p. ej. canciones guardadas o listas del usuario), es preferible que ese endpoint devuelva los resúmenes embebidos, como las reseñas. Si aun así hiciera falta el endpoint genérico, el contrato propuesto sirve tal cual (`ids` separados por coma, máximo 50, IDs inexistentes omitidos, `400` si la lista está vacía o es demasiado larga). Las imágenes deberían salir de la base de datos y, como mucho, completarse con el mismo presupuesto acotado.
+
+#### Verificación
+
+- Revisado en el código: los elementos de `/home` se construyen con `domain.Track` (`internal/core/services/recommendation_service.go`), el mismo tipo de `/music/search?type=track`. Las reseñas incluyen `target.summary` (`internal/core/services/review_service.go`).
+- Sin cambios de código.
