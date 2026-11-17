@@ -355,3 +355,115 @@ Si aparece una pantalla que guarde listas de canciones por ID (p. ej. canciones 
 
 - Revisado en el código: los elementos de `/home` se construyen con `domain.Track` (`internal/core/services/recommendation_service.go`), el mismo tipo de `/music/search?type=track`. Las reseñas incluyen `target.summary` (`internal/core/services/review_service.go`).
 - Sin cambios de código.
+
+---
+
+### HOME-04 · Feed de reseñas "Para ti (Popular)" y "Siguiendo"
+
+- **Estado:** Resuelta · **Fecha:** 2026-11-16
+- **Responsable:** Backend
+
+#### Qué se pidió
+
+Las tabs de Inicio y `ReviewCard` (nodo `14296:10728`) necesitan reseñas con autor, canción, calificación, texto, número de Me gusta y de comentarios, si el usuario sigue al autor y si la guardó. El backend no tenía seguidores, Me gusta ni comentarios. Se pidió como mínimo `GET /api/v1/feed?tab=popular|following&cursor=…` con paginación por cursor.
+
+Producto definió el orden:
+
+- **Para ti:** las reseñas del día ordenadas por popularidad; cuando se acaban las de un día, siguen las del anterior.
+- **Siguiendo:** las reseñas de los usuarios que sigues, de la más nueva a la más antigua.
+
+#### Decisión
+
+Se implementó el feed y, para alimentarlo, la parte del módulo social que faltaba:
+
+- **Seguidores:** seguir y dejar de seguir, listas de seguidores y seguidos, y perfil público con contadores.
+- **Me gusta** en reseñas.
+- **Comentarios** en hilos de un nivel (comentario raíz → respuestas).
+
+Reglas del feed:
+
+- **Popularidad** = `likes_count + 2 × comments_count`; un comentario vale el doble porque cuesta más escribirlo. Desempate: la más nueva.
+- **"El día"** se calcula en la zona horaria del cliente (`?tz=`, IANA). Sin `tz` se usa `America/Mazatlan`.
+- **"Para ti"** no incluye tus propias reseñas. Ambas tabs incluyen reseñas de canciones, álbumes y artistas.
+- **Paginación por cursor opaco** (keyset): estable aunque lleguen reseñas nuevas mientras se pagina.
+- **Guardados:** quedan fuera de esta solicitud. `saved_by_me` se envía siempre `false` para que la tarjeta no cambie cuando existan.
+
+`ReviewCard` recibe el mismo objeto en todas partes: `GET /reviews`, `GET /reviews/{id}`, `POST`/`PUT` y el feed traen ahora `likes_count`, `comments_count`, `liked_by_me`, `saved_by_me` y `following_author`, además de `target.summary` (HOME-02) y `rating_score`.
+
+#### Contrato de la API
+
+`GET /api/v1/feed?tab=popular&tz=America/Mazatlan&limit=20&cursor=…`
+
+| Parámetro | Valores |
+| --- | --- |
+| `tab` | `popular` o `following` (obligatorio) |
+| `tz` | Zona IANA, solo para `popular`. Default `America/Mazatlan` |
+| `limit` | 1–50, default 20 |
+| `cursor` | `next_cursor` de la página anterior; omitirlo pide la primera |
+
+```json
+{
+  "tab": "popular",
+  "timezone": "America/Mazatlan",
+  "limit": 20,
+  "next_cursor": "eyJzIjoiZmVlZDpwb3B1bGFyIiwi…",
+  "reviews": [
+    {
+      "id": "…",
+      "target": { "type": "song", "id": "3", "summary": { "track_name": "Do Not Let Me Go", "album_image_url": "https://i.scdn.co/image/…", "…": "…" } },
+      "title": null,
+      "content": "…",
+      "rating_score": 4.5,
+      "likes_count": 2,
+      "comments_count": 1,
+      "liked_by_me": true,
+      "saved_by_me": false,
+      "following_author": false,
+      "author": { "id": "…", "username": "omar_delangel", "display_name": "Omar Del Angel Villa", "avatar_url": "…" },
+      "created_at": "…",
+      "updated_at": "…"
+    }
+  ]
+}
+```
+
+| Caso | Respuesta |
+| --- | --- |
+| Página con más resultados | `200`, `next_cursor` con valor |
+| Última página | `200`, `next_cursor: null` |
+| "Siguiendo" sin seguir a nadie | `200`, `reviews: []` |
+| `tab` inválido, `tz` inválida, `limit` fuera de 1–50 | `400` |
+| Cursor mal formado, de la otra tab o de otra `tz` | `400` |
+| Sin Bearer | `401` |
+
+Endpoints sociales nuevos (detalle y ejemplos en el README, endpoints 25–27):
+
+| Método | Ruta | Respuesta |
+| --- | --- | --- |
+| `GET` | `/users/{id}` (UUID o username) | Perfil: `followers_count`, `following_count`, `reviews_count`, `followed_by_me`, `is_me` |
+| `POST` / `DELETE` | `/users/{id}/follow` | Perfil actualizado; idempotente; seguirte a ti mismo → `400` |
+| `GET` | `/users/{id}/followers`, `/users/{id}/following` | `{ users, next_cursor }` |
+| `POST` / `DELETE` | `/reviews/{id}/like` | `{ review_id, liked, likes_count }`; idempotente |
+| `GET` / `POST` | `/reviews/{id}/comments` | Raíces paginadas / crear (`content`, `parent_id` opcional) → `201` |
+| `GET` | `/comments/{id}/replies` | Respuestas paginadas |
+| `PUT` / `DELETE` | `/comments/{id}` | Solo el autor (`403` si no) |
+
+Un raíz borrado que tiene respuestas sale como `deleted: true` y `content: null`.
+
+#### Qué tiene que hacer el frontend
+
+1. Mostrar las tabs "Para ti" y "Siguiendo" con `GET /feed?tab=popular&tz=<zona del navegador>` y `GET /feed?tab=following`. La zona sale de `Intl.DateTimeFormat().resolvedOptions().timeZone`.
+2. Paginación infinita: enviar `next_cursor` tal cual y parar cuando sea `null`. Deduplicar por `id`: si una reseña gana Me gusta mientras se pagina "Para ti", puede cambiar de página. Si cambia la zona, empezar sin cursor.
+3. En `ReviewCard`: autor (`author`), objetivo (`target.summary`), `rating_score`, `content`, `likes_count`/`liked_by_me` (botón con `POST`/`DELETE /reviews/{id}/like`), `comments_count`, `following_author` (botón con `POST`/`DELETE /users/{author.id}/follow`). Ocultar "guardar" mientras `saved_by_me` no tenga endpoint.
+4. `rating_score` va de 0.5 a 5.0 en pasos de 0.5 (no de 1 a 5) y es `null` si el autor no calificó.
+
+#### Pendiente / fuera de alcance
+
+- Guardados (`saved_by_me` y su listado).
+- Me gusta en comentarios, menciones y notificaciones (las notificaciones están fuera del alcance del proyecto).
+- Si el volumen crece, acotar "Para ti" por rango de fechas para usar el índice (ver `implementacion.md` §10.2).
+
+#### Verificación
+
+- `go test ./...`: `feed_service_test.go` (cursor de ida y vuelta, día local del cursor, última página, un resumen por objetivo, "Siguiendo", validaciones de `tab`, `tz`, cursor y `limit`), `social_service_test.go`, `comment_service_test.go`, `TestReviewCamposSocialesSonDelViewer`, `TestRutasSocialesRequierenBearer` y `TestFeedDefaultTimezone`. La migración aplica y revierte (`migrate-down`/`up`).
+- Prueba manual contra Postgres con los usuarios del seed (`implementacion.md` §10.7): orden por día y puntaje, exclusión de las propias, recorrido completo con `limit=1`, "Siguiendo" antes y después de seguir, errores `400` y borrado lógico. Los datos de prueba se borraron.

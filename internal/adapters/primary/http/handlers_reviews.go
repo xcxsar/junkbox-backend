@@ -44,6 +44,11 @@ func (h *ReviewHandler) Create(w http.ResponseWriter, r *http.Request) {
 
 // List: GET /api/v1/reviews?target_type=&target_id=&limit=&page=
 func (h *ReviewHandler) List(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "no autorizado")
+		return
+	}
 	q := r.URL.Query()
 	limit, ok := intQuery(w, q.Get("limit"), "limit")
 	if !ok {
@@ -58,7 +63,7 @@ func (h *ReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "limit y page deben ser enteros positivos")
 		return
 	}
-	result, err := h.reviews.List(r.Context(), q.Get("target_type"), q.Get("target_id"), limit, page)
+	result, err := h.reviews.List(r.Context(), claims.UserID, q.Get("target_type"), q.Get("target_id"), limit, page)
 	if err != nil {
 		writeServiceError(w, err)
 		return
@@ -68,11 +73,16 @@ func (h *ReviewHandler) List(w http.ResponseWriter, r *http.Request) {
 
 // Get: GET /api/v1/reviews/{id}
 func (h *ReviewHandler) Get(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "no autorizado")
+		return
+	}
 	id, ok := uuidParam(w, r)
 	if !ok {
 		return
 	}
-	review, err := h.reviews.Get(r.Context(), id)
+	review, err := h.reviews.Get(r.Context(), claims.UserID, id)
 	if err != nil {
 		writeServiceError(w, err)
 		return

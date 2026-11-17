@@ -58,6 +58,9 @@ type CreateReviewParams struct {
 // sobre el mismo objetivo (NULL si no calificó).
 // En los filtros por objetivo solo uno de song_id / album_id / artist_id
 // llega con valor; las comparaciones con NULL se descartan.
+// Las consultas que devuelven reseñas (aquí y en feed.sql) tienen las mismas
+// columnas: el servicio convierte todas las filas a ListReviewsByTargetRow.
+// liked_by_me y following_author son del usuario que pide (viewer_id).
 func (q *Queries) CreateReview(ctx context.Context, arg CreateReviewParams) (uuid.UUID, error) {
 	row := q.db.QueryRowContext(ctx, createReview,
 		arg.UserID,
@@ -91,13 +94,21 @@ SELECT
     u.username AS author_username,
     u.display_name AS author_display_name,
     u.avatar_url AS author_avatar_url,
-    rat.score AS rating_score
+    rat.score AS rating_score,
+    r.comments_count, r.popularity_score,
+    EXISTS (SELECT 1 FROM review_likes l WHERE l.review_id = r.id AND l.user_id = $1)::bool AS liked_by_me,
+    EXISTS (SELECT 1 FROM follows f WHERE f.follower_id = $1 AND f.followee_id = r.user_id)::bool AS following_author
 FROM reviews r
 JOIN users u ON u.id = r.user_id
 LEFT JOIN ratings rat ON rat.user_id = r.user_id
     AND (rat.song_id = r.song_id OR rat.album_id = r.album_id OR rat.artist_id = r.artist_id)
-WHERE r.id = $1
+WHERE r.id = $2
 `
+
+type GetReviewByIDParams struct {
+	ViewerID uuid.UUID `json:"viewer_id"`
+	ID       uuid.UUID `json:"id"`
+}
 
 type GetReviewByIDRow struct {
 	ID                uuid.UUID      `json:"id"`
@@ -114,10 +125,14 @@ type GetReviewByIDRow struct {
 	AuthorDisplayName sql.NullString `json:"author_display_name"`
 	AuthorAvatarUrl   sql.NullString `json:"author_avatar_url"`
 	RatingScore       *float64       `json:"rating_score"`
+	CommentsCount     int32          `json:"comments_count"`
+	PopularityScore   sql.NullInt32  `json:"popularity_score"`
+	LikedByMe         bool           `json:"liked_by_me"`
+	FollowingAuthor   bool           `json:"following_author"`
 }
 
-func (q *Queries) GetReviewByID(ctx context.Context, id uuid.UUID) (GetReviewByIDRow, error) {
-	row := q.db.QueryRowContext(ctx, getReviewByID, id)
+func (q *Queries) GetReviewByID(ctx context.Context, arg GetReviewByIDParams) (GetReviewByIDRow, error) {
+	row := q.db.QueryRowContext(ctx, getReviewByID, arg.ViewerID, arg.ID)
 	var i GetReviewByIDRow
 	err := row.Scan(
 		&i.ID,
@@ -134,8 +149,23 @@ func (q *Queries) GetReviewByID(ctx context.Context, id uuid.UUID) (GetReviewByI
 		&i.AuthorDisplayName,
 		&i.AuthorAvatarUrl,
 		&i.RatingScore,
+		&i.CommentsCount,
+		&i.PopularityScore,
+		&i.LikedByMe,
+		&i.FollowingAuthor,
 	)
 	return i, err
+}
+
+const getReviewOwner = `-- name: GetReviewOwner :one
+SELECT user_id FROM reviews WHERE id = $1
+`
+
+func (q *Queries) GetReviewOwner(ctx context.Context, id uuid.UUID) (uuid.UUID, error) {
+	row := q.db.QueryRowContext(ctx, getReviewOwner, id)
+	var user_id uuid.UUID
+	err := row.Scan(&user_id)
+	return user_id, err
 }
 
 const listReviewsByTarget = `-- name: ListReviewsByTarget :many
@@ -145,19 +175,23 @@ SELECT
     u.username AS author_username,
     u.display_name AS author_display_name,
     u.avatar_url AS author_avatar_url,
-    rat.score AS rating_score
+    rat.score AS rating_score,
+    r.comments_count, r.popularity_score,
+    EXISTS (SELECT 1 FROM review_likes l WHERE l.review_id = r.id AND l.user_id = $1)::bool AS liked_by_me,
+    EXISTS (SELECT 1 FROM follows f WHERE f.follower_id = $1 AND f.followee_id = r.user_id)::bool AS following_author
 FROM reviews r
 JOIN users u ON u.id = r.user_id
 LEFT JOIN ratings rat ON rat.user_id = r.user_id
     AND (rat.song_id = r.song_id OR rat.album_id = r.album_id OR rat.artist_id = r.artist_id)
-WHERE r.song_id = $1::int
-   OR r.album_id = $2::uuid
-   OR r.artist_id = $3::uuid
+WHERE r.song_id = $2::int
+   OR r.album_id = $3::uuid
+   OR r.artist_id = $4::uuid
 ORDER BY r.created_at DESC, r.id
-LIMIT $5 OFFSET $4
+LIMIT $6 OFFSET $5
 `
 
 type ListReviewsByTargetParams struct {
+	ViewerID   uuid.UUID     `json:"viewer_id"`
 	SongID     sql.NullInt32 `json:"song_id"`
 	AlbumID    *uuid.UUID    `json:"album_id"`
 	ArtistID   *uuid.UUID    `json:"artist_id"`
@@ -180,10 +214,15 @@ type ListReviewsByTargetRow struct {
 	AuthorDisplayName sql.NullString `json:"author_display_name"`
 	AuthorAvatarUrl   sql.NullString `json:"author_avatar_url"`
 	RatingScore       *float64       `json:"rating_score"`
+	CommentsCount     int32          `json:"comments_count"`
+	PopularityScore   sql.NullInt32  `json:"popularity_score"`
+	LikedByMe         bool           `json:"liked_by_me"`
+	FollowingAuthor   bool           `json:"following_author"`
 }
 
 func (q *Queries) ListReviewsByTarget(ctx context.Context, arg ListReviewsByTargetParams) ([]ListReviewsByTargetRow, error) {
 	rows, err := q.db.QueryContext(ctx, listReviewsByTarget,
+		arg.ViewerID,
 		arg.SongID,
 		arg.AlbumID,
 		arg.ArtistID,
@@ -212,6 +251,10 @@ func (q *Queries) ListReviewsByTarget(ctx context.Context, arg ListReviewsByTarg
 			&i.AuthorDisplayName,
 			&i.AuthorAvatarUrl,
 			&i.RatingScore,
+			&i.CommentsCount,
+			&i.PopularityScore,
+			&i.LikedByMe,
+			&i.FollowingAuthor,
 		); err != nil {
 			return nil, err
 		}

@@ -82,18 +82,24 @@ type ReviewAuthor struct {
 }
 
 // Review es una reseña. RatingScore es el voto actual del autor sobre el
-// mismo objetivo (nil si no calificó). LikesCount está reservado y por
-// ahora siempre es 0.
+// mismo objetivo (nil si no calificó). CommentsCount cuenta los comentarios
+// visibles (raíces y respuestas). LikedByMe y FollowingAuthor son del
+// usuario que pide. SavedByMe se reserva para los guardados (por ahora
+// siempre false).
 type Review struct {
-	ID          uuid.UUID    `json:"id"`
-	Target      TargetRef    `json:"target"`
-	Title       *string      `json:"title"`
-	Content     string       `json:"content"`
-	RatingScore *float64     `json:"rating_score"`
-	LikesCount  int32        `json:"likes_count"`
-	Author      ReviewAuthor `json:"author"`
-	CreatedAt   time.Time    `json:"created_at"`
-	UpdatedAt   time.Time    `json:"updated_at"`
+	ID              uuid.UUID    `json:"id"`
+	Target          TargetRef    `json:"target"`
+	Title           *string      `json:"title"`
+	Content         string       `json:"content"`
+	RatingScore     *float64     `json:"rating_score"`
+	LikesCount      int32        `json:"likes_count"`
+	CommentsCount   int32        `json:"comments_count"`
+	LikedByMe       bool         `json:"liked_by_me"`
+	SavedByMe       bool         `json:"saved_by_me"`
+	FollowingAuthor bool         `json:"following_author"`
+	Author          ReviewAuthor `json:"author"`
+	CreatedAt       time.Time    `json:"created_at"`
+	UpdatedAt       time.Time    `json:"updated_at"`
 }
 
 // ReviewPage es la respuesta de GET /reviews. Count es el número de reseñas

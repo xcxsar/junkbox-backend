@@ -67,6 +67,14 @@ Este documento establece la especificación técnica, diseño de arquitectura y 
   - [9.5 Código](#95-código)
   - [9.6 Decisiones](#96-decisiones)
   - [9.7 Verificación](#97-verificación)
+- [10. Fase 6: Módulo Social y Feeds de Reseñas (HOME-04)](#10-fase-6-módulo-social-y-feeds-de-reseñas-home-04)
+  - [10.1 Esquema: `create_social`](#101-esquema-create_social)
+  - [10.2 Feeds: Día Local, Popularidad y Cursor](#102-feeds-día-local-popularidad-y-cursor)
+  - [10.3 Seguidores y Me Gusta](#103-seguidores-y-me-gusta)
+  - [10.4 Comentarios en Hilos](#104-comentarios-en-hilos)
+  - [10.5 Código](#105-código)
+  - [10.6 Decisiones](#106-decisiones)
+  - [10.7 Verificación](#107-verificación)
 
 ---
 
@@ -2941,3 +2949,98 @@ Qué debe pasar:
 - Tras calificar la canción `1083842` (género `emo`): `strategy: "similar_to_last"`, `seed.id = 1083842` y 8 canciones `emo`, sin la semilla.
 - `?limit=0` o `?limit=51` → `400`; sin Bearer → `401`.
 - Tests: `recommendation_service_test.go` y `handlers_home_test.go`.
+
+---
+
+## 10. Fase 6: Módulo Social y Feeds de Reseñas (HOME-04)
+
+Las pestañas "Para ti" y "Siguiendo" de Inicio necesitaban reseñas con Me gusta, comentarios y si el usuario sigue al autor. Antes de esta fase solo existían las reseñas (`likes_count` reservado, siempre en 0). Esta fase añade seguidores, Me gusta, comentarios en hilos y `GET /api/v1/feed`. El contrato para el frontend está en [`docs/solicitudes.md` (HOME-04)](docs/solicitudes.md) y los ejemplos, en el README (endpoints 24–27).
+
+### 10.1 Esquema: `create_social`
+
+Migración `20261116000010_create_social.sql`:
+
+| Tabla / cambio | Detalle |
+|---|---|
+| `follows (follower_id, followee_id, created_at)` | PK `(follower_id, followee_id)`, `CHECK` contra seguirse a sí mismo, índices `(follower_id, created_at DESC, followee_id DESC)` y `(followee_id, created_at DESC, follower_id DESC)` para las listas con keyset |
+| `review_likes (review_id, user_id, created_at)` | PK `(review_id, user_id)`: un Me gusta por usuario |
+| `review_comments` | `parent_id` NULL = raíz. `content` NULL solo si `deleted_at` tiene valor (`CHECK`), 1–1000 caracteres si no. El trigger `check_comment_parent` exige que una respuesta apunte a un raíz de la misma reseña |
+| `reviews.comments_count` | Comentarios visibles (raíces y respuestas) |
+| `reviews.popularity_score` | Columna generada `likes_count + 2 * comments_count` |
+| Índices de `reviews` | `(created_at DESC, id DESC)` y `(user_id, created_at DESC, id DESC)` |
+
+Los contadores se mantienen con triggers de deltas, igual que `adjust_rating_stats` (§6.2): el `UPDATE` bloquea la fila de la reseña, así que Me gusta concurrentes no se pisan, y nunca se recorre la tabla. El de comentarios suma al insertar uno visible, resta al borrar uno visible y ajusta cuando cambia `deleted_at`. Todas las FKs son `ON DELETE CASCADE`: borrar una reseña o un usuario borra sus Me gusta, comentarios y seguimientos. `db/scripts/truncate_all.sql` ya vacía las tablas nuevas, porque recorre todas las del esquema.
+
+### 10.2 Feeds: Día Local, Popularidad y Cursor
+
+`db/queries/feed.sql` tiene dos consultas con las mismas columnas que `ListReviewsByTarget`, así que `FeedService` reutiliza `reviewFromRow` y el resumen del objetivo (HOME-02). Los resúmenes de una página se piden una vez por objetivo y en paralelo (8 a la vez), porque cada uno puede esperar a Spotify con su propio presupuesto.
+
+- **"Para ti" (`ListPopularFeed`)** ordena por `((created_at AT TIME ZONE tz)::date, popularity_score, created_at, id)`, todo descendente, y excluye las reseñas propias. "Las del día y luego las del anterior" sale del mismo orden: no hay un corte por día y los días sin reseñas se saltan solos.
+- **"Siguiendo" (`ListFollowingFeed`)** hace `JOIN follows` con el usuario y ordena por `(created_at, id)` descendente.
+- **Zona horaria.** `?tz=` (IANA) se valida con `time.LoadLocation` (el binario embebe `time/tzdata`, así que no depende de la imagen) y se pasa a Postgres. Sin `tz` se usa `FEED_DEFAULT_TIMEZONE` (`America/Mazatlan`), que `config` valida al arrancar.
+- **Cursor keyset.** Se pide `limit + 1` filas para saber si hay otra página. `next_cursor` es la última fila entregada en JSON y base64url (`cursor.go`): `scope` (`feed:popular`, `feed:following`, `comments:<reseña>`, `replies:<comentario>`, `followers:<usuario>`, `following:<usuario>`), y la fecha y el id de la fila; en "Para ti" también `tz`, el día local y el puntaje. La consulta continúa con una comparación de filas (`(día, puntaje, fecha, id) < (cursor…)`). Un cursor mal formado, de otro listado o generado con otra `tz` es un `400`. El día del cursor se calcula en Go con la misma zona; viaja como texto (`AAAA-MM-DD`) para que el driver no lo convierta de zona.
+
+**Limitaciones conocidas:**
+
+- Si los Me gusta o comentarios de una reseña cambian mientras el usuario pagina "Para ti", su puntaje cambia de posición y la reseña puede repetirse o saltarse entre páginas. Es lo normal en un keyset sobre un valor que cambia; el frontend deduplica por `id`.
+- El día local depende de `tz` y no es indexable. Con el volumen actual (pocas reseñas por día) Postgres ordena las candidatas en memoria. Si crece, la alternativa es acotar cada página a un rango de `created_at` (el día del cursor en esa zona) y usar `idx_reviews_created`.
+
+### 10.3 Seguidores y Me Gusta
+
+`SocialService` (`social_service.go`):
+
+- `/users/{id}` acepta UUID o username. Los usernames no admiten guiones (`^[a-z0-9_.]{3,50}$`), así que no se confunden con un UUID. `GetPublicProfile` cuenta seguidores, seguidos y reseñas con subconsultas sobre los índices.
+- `Follow`/`Unfollow` son idempotentes (`ON CONFLICT DO NOTHING` / `DELETE`) y devuelven el perfil actualizado. Seguirse a uno mismo es `400` (además del `CHECK`).
+- `Like`/`Unlike` comprueban que la reseña exista, escriben y releen `likes_count` (el trigger ya lo actualizó). Un `23503` (la reseña se borró a la vez) se traduce a `404`.
+
+### 10.4 Comentarios en Hilos
+
+`CommentService` (`comment_service.go`) y `postgres.CommentRemover`:
+
+- **Un nivel.** Si `parent_id` apunta a una respuesta, el comentario se cuelga de su raíz. El padre debe ser de la misma reseña y no estar eliminado.
+- **Borrado.** Solo el autor (`403`). Dentro de una transacción se bloquea el comentario (`FOR UPDATE`): si es un raíz con respuestas, queda con `deleted_at` y sin contenido; si no, se borra. Si era la última respuesta de un raíz ya eliminado, también se borra el raíz. Una respuesta que llega a la vez espera, porque su FK toma `FOR KEY SHARE` sobre el raíz. Si el raíz se borró, la inserción falla con `23503` y se responde `404`.
+- **Listados.** Raíces (con `replies_count`) y respuestas, del más antiguo al más nuevo, con el mismo cursor keyset.
+
+### 10.5 Código
+
+| Capa | Archivo |
+|---|---|
+| Esquema | `db/migrations/20261116000010_create_social.sql` |
+| Queries | `db/queries/feed.sql`, `social.sql`, `comments.sql`; `reviews.sql` añade `comments_count`, `popularity_score`, `liked_by_me`, `following_author` (con `viewer_id`) y `GetReviewOwner` |
+| Dominio | `internal/core/domain/social.go`; `Review` gana `comments_count`, `liked_by_me`, `saved_by_me` (siempre `false`) y `following_author` |
+| Puertos | `internal/core/ports/social_ports.go` (`FeedStore`, `SocialStore`, `CommentStore`, `CommentRemover`) |
+| Servicios | `feed_service.go`, `social_service.go`, `comment_service.go`, `cursor.go`. `ReviewService.Get/List` reciben al usuario que pide |
+| Adaptadores | `postgres/comment_remover.go`; `http/handlers_social.go` y `handlers_comments.go` (`SocialHandler`), rutas en `router.go` (`RouterOptions.Social`) |
+| Configuración | `FEED_DEFAULT_TIMEZONE` en `config.go`, `.env.template` y `deploy/k8s/base/configmap.yaml`; `main.go` importa `time/tzdata` |
+
+### 10.6 Decisiones
+
+| Tema | Elegido | Alternativas consideradas |
+|---|---|---|
+| Alcance | Seguidores, Me gusta y comentarios | Incluir guardados (`saved_by_me` queda en `false`) |
+| Popularidad | `likes + 2·comentarios` (columna generada) | Solo Me gusta; `likes + comentarios`; contar un comentario por autor |
+| Día | Zona del cliente (`?tz=`), default `America/Mazatlan` | Zona fija; UTC (el día cambiaría a las 17:00 en Sinaloa) |
+| Paginación | Cursor opaco keyset | `page`/`limit` con OFFSET (se repiten o saltan elementos al llegar reseñas nuevas) |
+| Hilos | Un nivel; responder a una respuesta cuelga del raíz | Profundidad ilimitada (consultas recursivas) |
+| Borrado de comentario | Lógico si es un raíz con respuestas, físico si no | Cascada (el autor del raíz borraría lo que escribieron otros) |
+| Seguidores | Seguir/dejar, listas y perfil con contadores | Solo seguir/dejar |
+| Rutas de usuario | UUID o username | Solo UUID |
+| "Para ti" | Todos los tipos de objetivo, sin las reseñas propias | Solo canciones; incluir las propias |
+
+### 10.7 Verificación
+
+```bash
+make migrate-up && make sqlc && go vet ./... && go test ./...
+make run-server
+```
+
+Con los usuarios del seed (A = `cesar_beltran`, B = `carlos_andrade`, C = `omar_delangel`):
+
+1. B y C publican reseñas. Se pasan dos de ellas a "ayer" en la BD (`UPDATE reviews SET created_at = created_at - interval '1 day' WHERE id IN (…)`). A también publica una.
+2. A y B dan Me gusta a una de C. A, C y A comentan una de B (incluida una respuesta a una respuesta).
+3. `GET /feed?tab=popular&tz=America/Mazatlan` como A: primero las de hoy (la de B con 3 comentarios, puntaje 6, antes que la de C con 2 Me gusta), luego las de ayer. La de A no aparece. Con `limit=1` y `next_cursor` se recorren todas sin repetir.
+4. `tab=following` sale vacío; tras `POST /users/carlos_andrade/follow` trae solo las de B, de la más nueva a la más antigua, con `following_author: true`.
+5. `tz=Mars/Base`, un cursor de `popular` usado en `following`, el mismo cursor con otra `tz` y seguirse a sí mismo → `400`.
+6. Borrar el raíz con respuestas lo deja como `deleted: true` y `comments_count` baja de 3 a 2.
+
+Resultado de la prueba del 2026-11-16: todo coincidió. Los datos de prueba se borraron al final.

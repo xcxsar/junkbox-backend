@@ -145,6 +145,12 @@ type EmailOutbox struct {
 	CreatedAt     time.Time      `json:"created_at"`
 }
 
+type Follow struct {
+	FollowerID uuid.UUID `json:"follower_id"`
+	FolloweeID uuid.UUID `json:"followee_id"`
+	CreatedAt  time.Time `json:"created_at"`
+}
+
 type Rating struct {
 	ID        uuid.UUID     `json:"id"`
 	UserID    uuid.UUID     `json:"user_id"`
@@ -169,16 +175,35 @@ type RefreshToken struct {
 }
 
 type Review struct {
-	ID         uuid.UUID      `json:"id"`
-	UserID     uuid.UUID      `json:"user_id"`
-	SongID     sql.NullInt32  `json:"song_id"`
-	AlbumID    *uuid.UUID     `json:"album_id"`
-	ArtistID   *uuid.UUID     `json:"artist_id"`
-	Title      sql.NullString `json:"title"`
-	Content    string         `json:"content"`
-	LikesCount int32          `json:"likes_count"`
-	CreatedAt  time.Time      `json:"created_at"`
-	UpdatedAt  time.Time      `json:"updated_at"`
+	ID              uuid.UUID      `json:"id"`
+	UserID          uuid.UUID      `json:"user_id"`
+	SongID          sql.NullInt32  `json:"song_id"`
+	AlbumID         *uuid.UUID     `json:"album_id"`
+	ArtistID        *uuid.UUID     `json:"artist_id"`
+	Title           sql.NullString `json:"title"`
+	Content         string         `json:"content"`
+	LikesCount      int32          `json:"likes_count"`
+	CreatedAt       time.Time      `json:"created_at"`
+	UpdatedAt       time.Time      `json:"updated_at"`
+	CommentsCount   int32          `json:"comments_count"`
+	PopularityScore sql.NullInt32  `json:"popularity_score"`
+}
+
+type ReviewComment struct {
+	ID        uuid.UUID      `json:"id"`
+	ReviewID  uuid.UUID      `json:"review_id"`
+	UserID    uuid.UUID      `json:"user_id"`
+	ParentID  *uuid.UUID     `json:"parent_id"`
+	Content   sql.NullString `json:"content"`
+	DeletedAt sql.NullTime   `json:"deleted_at"`
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+}
+
+type ReviewLike struct {
+	ReviewID  uuid.UUID `json:"review_id"`
+	UserID    uuid.UUID `json:"user_id"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type RevokedAccessToken struct {

@@ -24,7 +24,10 @@ type RouterOptions struct {
 	// Home expone el feed de Inicio (recomendaciones). Si es nil, la ruta
 	// no se monta.
 	Home *HomeHandler
-	JWT  chimw.JWTValidator
+	// Social expone el feed de reseñas, perfiles, seguidores, Me gusta y
+	// comentarios. Si es nil, esas rutas no se montan.
+	Social *SocialHandler
+	JWT    chimw.JWTValidator
 	// Revocation comprueba la denylist y el corte global en cada petición
 	// autenticada. Si es nil, se omite la comprobación (tests).
 	Revocation chimw.TokenRevocation
@@ -95,6 +98,21 @@ func NewRouter(opts RouterOptions) http.Handler {
 			}
 			if opts.Home != nil {
 				r.Get("/home", opts.Home.Home)
+			}
+			if opts.Social != nil {
+				r.Get("/feed", opts.Social.Feed)
+				r.Get("/users/{id}", opts.Social.Profile)
+				r.Post("/users/{id}/follow", opts.Social.Follow)
+				r.Delete("/users/{id}/follow", opts.Social.Unfollow)
+				r.Get("/users/{id}/followers", opts.Social.Followers)
+				r.Get("/users/{id}/following", opts.Social.Following)
+				r.Post("/reviews/{id}/like", opts.Social.Like)
+				r.Delete("/reviews/{id}/like", opts.Social.Unlike)
+				r.Get("/reviews/{id}/comments", opts.Social.ListComments)
+				r.Post("/reviews/{id}/comments", opts.Social.CreateComment)
+				r.Get("/comments/{id}/replies", opts.Social.ListReplies)
+				r.Put("/comments/{id}", opts.Social.UpdateComment)
+				r.Delete("/comments/{id}", opts.Social.DeleteComment)
 			}
 		})
 	})

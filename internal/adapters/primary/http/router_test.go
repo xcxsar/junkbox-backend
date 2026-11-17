@@ -117,3 +117,30 @@ func TestRouterIdentificaLaInstancia(t *testing.T) {
 		t.Fatalf("sin Instance no debía enviarse X-Instance")
 	}
 }
+
+func TestRutasSocialesRequierenBearer(t *testing.T) {
+	h := NewRouter(RouterOptions{Auth: &AuthHandler{}, Social: &SocialHandler{}})
+	id := "f5000000-0000-0000-0000-000000000001"
+	routes := []struct{ method, path string }{
+		{http.MethodGet, "/api/v1/feed?tab=popular"},
+		{http.MethodGet, "/api/v1/users/cesar_beltran"},
+		{http.MethodPost, "/api/v1/users/cesar_beltran/follow"},
+		{http.MethodDelete, "/api/v1/users/cesar_beltran/follow"},
+		{http.MethodGet, "/api/v1/users/cesar_beltran/followers"},
+		{http.MethodGet, "/api/v1/users/cesar_beltran/following"},
+		{http.MethodPost, "/api/v1/reviews/" + id + "/like"},
+		{http.MethodDelete, "/api/v1/reviews/" + id + "/like"},
+		{http.MethodGet, "/api/v1/reviews/" + id + "/comments"},
+		{http.MethodPost, "/api/v1/reviews/" + id + "/comments"},
+		{http.MethodGet, "/api/v1/comments/" + id + "/replies"},
+		{http.MethodPut, "/api/v1/comments/" + id},
+		{http.MethodDelete, "/api/v1/comments/" + id},
+	}
+	for _, rt := range routes {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(rt.method, rt.path, nil))
+		if rec.Code != http.StatusUnauthorized {
+			t.Errorf("%s %s sin token: status %d, esperaba 401", rt.method, rt.path, rec.Code)
+		}
+	}
+}

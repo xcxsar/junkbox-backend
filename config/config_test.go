@@ -129,3 +129,27 @@ func TestTermsVersion(t *testing.T) {
 		}
 	}
 }
+
+func TestFeedDefaultTimezone(t *testing.T) {
+	setRequired(t)
+	t.Setenv("FEED_DEFAULT_TIMEZONE", "")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.FeedDefaultTimezone != "America/Mazatlan" {
+		t.Errorf("FEED_DEFAULT_TIMEZONE default = %q", cfg.FeedDefaultTimezone)
+	}
+
+	t.Setenv("FEED_DEFAULT_TIMEZONE", "America/Mexico_City")
+	if cfg, err = Load(""); err != nil || cfg.FeedDefaultTimezone != "America/Mexico_City" {
+		t.Errorf("FEED_DEFAULT_TIMEZONE = %q (%v)", cfg.FeedDefaultTimezone, err)
+	}
+
+	for _, v := range []string{"   ", "Mars/Base", "Local"} {
+		t.Setenv("FEED_DEFAULT_TIMEZONE", v)
+		if _, err := Load(""); err == nil {
+			t.Errorf("esperaba error para FEED_DEFAULT_TIMEZONE=%q", v)
+		}
+	}
+}

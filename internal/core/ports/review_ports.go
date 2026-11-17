@@ -36,7 +36,8 @@ type RatingStore interface {
 // ReviewStore son las queries de reseñas.
 type ReviewStore interface {
 	CreateReview(ctx context.Context, arg sqlc.CreateReviewParams) (uuid.UUID, error)
-	GetReviewByID(ctx context.Context, id uuid.UUID) (sqlc.GetReviewByIDRow, error)
+	GetReviewByID(ctx context.Context, arg sqlc.GetReviewByIDParams) (sqlc.GetReviewByIDRow, error)
+	GetReviewOwner(ctx context.Context, id uuid.UUID) (uuid.UUID, error)
 	ListReviewsByTarget(ctx context.Context, arg sqlc.ListReviewsByTargetParams) ([]sqlc.ListReviewsByTargetRow, error)
 	CountReviewsByTarget(ctx context.Context, arg sqlc.CountReviewsByTargetParams) (int64, error)
 	UpdateReview(ctx context.Context, arg sqlc.UpdateReviewParams) (int64, error)

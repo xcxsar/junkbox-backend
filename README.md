@@ -439,6 +439,19 @@ El backend utiliza tokens de acceso **JWT HS256** (15 minutos de vigencia) con c
 | `PUT` | `/api/v1/reviews/{id}` | Bearer | Edita una reseña del usuario |
 | `DELETE` | `/api/v1/reviews/{id}` | Bearer | Elimina una reseña del usuario |
 | `GET` | `/api/v1/home` | Bearer | Feed de Inicio: recomendaciones a partir de la última canción calificada o reseñada |
+| `GET` | `/api/v1/feed` | Bearer | Feed de reseñas "Para ti" (por día y popularidad) o "Siguiendo", con cursor |
+| `GET` | `/api/v1/users/{id}` | Bearer | Perfil público (UUID o username) con contadores de seguidores |
+| `POST` | `/api/v1/users/{id}/follow` | Bearer | Seguir a un usuario |
+| `DELETE` | `/api/v1/users/{id}/follow` | Bearer | Dejar de seguir a un usuario |
+| `GET` | `/api/v1/users/{id}/followers` | Bearer | Seguidores de un usuario, con cursor |
+| `GET` | `/api/v1/users/{id}/following` | Bearer | Usuarios que sigue, con cursor |
+| `POST` | `/api/v1/reviews/{id}/like` | Bearer | Dar Me gusta a una reseña |
+| `DELETE` | `/api/v1/reviews/{id}/like` | Bearer | Quitar el Me gusta |
+| `GET` | `/api/v1/reviews/{id}/comments` | Bearer | Comentarios raíz de una reseña, con cursor |
+| `POST` | `/api/v1/reviews/{id}/comments` | Bearer | Comentar una reseña o responder a un comentario |
+| `GET` | `/api/v1/comments/{id}/replies` | Bearer | Respuestas de un comentario, con cursor |
+| `PUT` | `/api/v1/comments/{id}` | Bearer | Editar un comentario propio |
+| `DELETE` | `/api/v1/comments/{id}` | Bearer | Borrar un comentario propio |
 
 ---
 
@@ -1009,6 +1022,10 @@ curl -i -X POST http://localhost:8080/api/v1/reviews \
   "content": "Una interpretación magnífica y un ritmo impecable.",
   "rating_score": 4.5,
   "likes_count": 0,
+  "comments_count": 0,
+  "liked_by_me": false,
+  "saved_by_me": false,
+  "following_author": false,
   "author": {
     "id": "b1000000-0000-0000-0000-000000000001",
     "username": "cesar_beltran",
@@ -1020,7 +1037,7 @@ curl -i -X POST http://localhost:8080/api/v1/reviews \
 }
 ```
 
-`likes_count` está reservado para una fase futura y por ahora siempre vale `0`. Los endpoints 18, 20 y 21 devuelven este mismo objeto.
+`likes_count` y `comments_count` cuentan los Me gusta y los comentarios visibles (endpoints 25 y 26). `liked_by_me` y `following_author` son del usuario que hace la petición. `saved_by_me` está reservado para los guardados y por ahora siempre vale `false`. Los endpoints 18, 19, 20, 21 y 24 devuelven este mismo objeto.
 
 ---
 
@@ -1186,6 +1203,147 @@ Cada elemento lleva `type` (por ahora siempre `track`) y los mismos campos que u
 
 ---
 
+#### 24. Feed de Reseñas (`GET /api/v1/feed`)
+Las pestañas "Para ti" y "Siguiendo" de Inicio. Cada reseña es el mismo objeto del endpoint 18 (con `target.summary`, Me gusta, comentarios y si sigues al autor).
+
+- `tab=popular` ("Para ti"): reseñas de **otros** usuarios, agrupadas por día en la zona `tz`, del día más reciente al más antiguo. Dentro de cada día se ordenan por popularidad: `likes_count + 2 × comments_count` (desempate: la más nueva). Al terminarse las de un día siguen las del anterior.
+- `tab=following` ("Siguiendo"): reseñas de los usuarios que sigues, de la más nueva a la más antigua.
+
+**Parámetros (query):**
+- `tab` (obligatorio): `popular` o `following`.
+- `tz` (opcional, solo `popular`): zona IANA que define "el día", p. ej. `America/Mexico_City`. Default `FEED_DEFAULT_TIMEZONE` (`America/Mazatlan`).
+- `limit` (opcional): de 1 a 50, default 20.
+- `cursor` (opcional): el `next_cursor` de la página anterior. Es opaco y solo vale para la misma `tab` (y la misma `tz`).
+
+```bash
+curl -s "http://localhost:8080/api/v1/feed?tab=popular&tz=America/Mazatlan&limit=20" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+**Respuesta (`200 OK`):**
+```json
+{
+  "tab": "popular",
+  "timezone": "America/Mazatlan",
+  "limit": 20,
+  "next_cursor": "eyJzIjoiZmVlZDpwb3B1bGFyIiwieiI6…",
+  "reviews": [ { "id": "…", "target": { "type": "song", "id": "3", "summary": { "…": "…" } }, "likes_count": 2, "comments_count": 1, "liked_by_me": true, "following_author": false, "…": "…" } ]
+}
+```
+
+`next_cursor` es `null` en la última página. Errores `400`: `tab` distinto de `popular`/`following`, `tz` inválida, `limit` fuera de rango, cursor mal formado o de otra pestaña o zona.
+
+---
+
+#### 25. Perfiles y Seguidores (`/api/v1/users/{id}`)
+`{id}` es el UUID o el username.
+
+- `GET /users/{id}`: perfil público.
+- `POST /users/{id}/follow` / `DELETE /users/{id}/follow`: seguir o dejar de seguir. Son idempotentes y devuelven el perfil actualizado. Seguirse a uno mismo es `400`.
+- `GET /users/{id}/followers` / `GET /users/{id}/following`: listas paginadas con `cursor` y `limit` (1–50, default 20), del seguimiento más reciente al más antiguo.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/users/carlos_andrade/follow \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+**Respuesta (`200 OK`):**
+```json
+{
+  "id": "b2000000-0000-0000-0000-000000000002",
+  "username": "carlos_andrade",
+  "display_name": "Carlos Eduardo Andrade Gámez",
+  "avatar_url": "https://api.dicebear.com/7.x/bottts/svg?seed=carlos",
+  "created_at": "2026-10-28T03:39:24Z",
+  "followers_count": 1,
+  "following_count": 0,
+  "reviews_count": 3,
+  "followed_by_me": true,
+  "is_me": false
+}
+```
+
+Listas (`GET /users/{id}/followers`):
+```json
+{
+  "user_id": "b2000000-0000-0000-0000-000000000002",
+  "limit": 20,
+  "next_cursor": null,
+  "users": [
+    {
+      "id": "b1000000-0000-0000-0000-000000000001",
+      "username": "cesar_beltran",
+      "display_name": "César David Beltrán Loredo",
+      "avatar_url": "https://api.dicebear.com/7.x/bottts/svg?seed=cesar",
+      "followed_at": "2026-11-17T04:55:23Z",
+      "followed_by_me": false
+    }
+  ]
+}
+```
+
+`followed_by_me` es si tú sigues a cada usuario de la lista.
+
+---
+
+#### 26. Me Gusta (`POST|DELETE /api/v1/reviews/{id}/like`)
+Da o quita el Me gusta del usuario a una reseña. Es idempotente. `404` si la reseña no existe.
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/reviews/f5000000-0000-0000-0000-000000000001/like \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+**Respuesta (`200 OK`):**
+```json
+{ "review_id": "f5000000-0000-0000-0000-000000000001", "liked": true, "likes_count": 3 }
+```
+
+---
+
+#### 27. Comentarios de Reseñas
+Hilos de un nivel: un comentario raíz y sus respuestas. Responder a una respuesta la cuelga del mismo raíz.
+
+- `POST /reviews/{id}/comments` → `201`. Cuerpo: `content` (1–1000 caracteres, se recortan los espacios) y `parent_id` opcional (UUID del comentario al que respondes).
+- `GET /reviews/{id}/comments`: comentarios raíz, del más antiguo al más nuevo, con `replies_count`.
+- `GET /comments/{id}/replies`: respuestas de un raíz, del más antiguo al más nuevo.
+- `PUT /comments/{id}` (cuerpo `content`) y `DELETE /comments/{id}`: solo el autor (`403` si no). Borrar un raíz que tiene respuestas lo deja como **comentario eliminado** (`deleted: true`, `content: null`) para conservar la conversación; si no tiene respuestas, se borra.
+
+Los listados paginan con `cursor` y `limit` (1–50, default 20).
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/reviews/f5000000-0000-0000-0000-000000000001/comments \
+  -H "Authorization: Bearer $ACCESS_TOKEN" -H "Content-Type: application/json" \
+  -d '{"content": "Totalmente de acuerdo", "parent_id": "9d7c2c30-4c7c-4a8c-a1de-48ad2c3c78df"}'
+```
+
+**Respuesta (`201 Created`):**
+```json
+{
+  "id": "4b0d0a5e-2f1c-4d7e-9a51-1c2f0e7b8a10",
+  "review_id": "f5000000-0000-0000-0000-000000000001",
+  "parent_id": "9d7c2c30-4c7c-4a8c-a1de-48ad2c3c78df",
+  "author": {
+    "id": "b1000000-0000-0000-0000-000000000001",
+    "username": "cesar_beltran",
+    "display_name": "César David Beltrán Loredo",
+    "avatar_url": "https://api.dicebear.com/7.x/bottts/svg?seed=cesar"
+  },
+  "content": "Totalmente de acuerdo",
+  "deleted": false,
+  "replies_count": 0,
+  "created_at": "2026-11-17T04:55:23Z",
+  "updated_at": "2026-11-17T04:55:23Z"
+}
+```
+
+Listados:
+```json
+{ "review_id": "…", "parent_id": null, "limit": 20, "next_cursor": null, "comments": [ { "…": "…" } ] }
+```
+
+---
+
 ### Formato Estándar de Errores
 
 Todas las respuestas con error devuelven formato JSON uniforme:
@@ -1198,7 +1356,7 @@ Todas las respuestas con error devuelven formato JSON uniforme:
 
 - `400 Bad Request`: parámetros faltantes, JSON malformado (incluidos campos desconocidos) o campos con formato inválido (p. ej. `type` distinto de `track`/`artist`/`album`, `target_type` distinto de `song`/`album`/`artist`, `limit` fuera de 1–50, un `{id}` o `target_id` que no es ni un ID local ni un ID de Spotify, `score` fuera de 0.5–5.0 o que no es múltiplo de 0.5, o `content` de reseña fuera de 5–5000 caracteres).
 - `401 Unauthorized`: Token ausente, firma expirada, token en denylist, refresh token ya utilizado, o token de correo (recuperación/verificación) inválido, usado o expirado.
-- `403 Forbidden`: intento de editar o borrar una calificación o reseña de otro usuario.
+- `403 Forbidden`: intento de editar o borrar una calificación, reseña o comentario de otro usuario.
 - `404 Not Found`: canción, artista, álbum, calificación o reseña no encontrada (incluye un `target_id` de Spotify que no está en el catálogo local y `GET /ratings/my` sin voto).
 - `409 Conflict`: `username` o `email` ya registrado, o segunda reseña del mismo usuario sobre el mismo objetivo.
 - `500 Internal Server Error`: fallo de conexión con la base de datos u otro error interno.

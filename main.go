@@ -5,6 +5,9 @@ package main
 import (
 	"fmt"
 	"os"
+	// Base de zonas horarias embebida: el feed "Para ti" valida ?tz= y la
+	// imagen Docker no depende de tener tzdata instalado.
+	_ "time/tzdata"
 
 	"github.com/xcxsar/junkbox-backend/cmd"
 )

@@ -120,10 +120,11 @@ func eqUUID(a, b *uuid.UUID) bool {
 // fakeReviews guarda las reseñas en memoria. createErr fuerza un error en
 // CreateReview (p. ej. 23505).
 type fakeReviews struct {
-	rows      map[uuid.UUID]sqlc.GetReviewByIDRow
-	createErr error
-	lastList  sqlc.ListReviewsByTargetParams
-	total     int64
+	rows       map[uuid.UUID]sqlc.GetReviewByIDRow
+	createErr  error
+	lastList   sqlc.ListReviewsByTargetParams
+	lastViewer uuid.UUID
+	total      int64
 }
 
 func newFakeReviews() *fakeReviews {
@@ -142,12 +143,21 @@ func (f *fakeReviews) CreateReview(_ context.Context, arg sqlc.CreateReviewParam
 	return id, nil
 }
 
-func (f *fakeReviews) GetReviewByID(_ context.Context, id uuid.UUID) (sqlc.GetReviewByIDRow, error) {
-	r, ok := f.rows[id]
+func (f *fakeReviews) GetReviewByID(_ context.Context, arg sqlc.GetReviewByIDParams) (sqlc.GetReviewByIDRow, error) {
+	f.lastViewer = arg.ViewerID
+	r, ok := f.rows[arg.ID]
 	if !ok {
 		return sqlc.GetReviewByIDRow{}, sql.ErrNoRows
 	}
 	return r, nil
+}
+
+func (f *fakeReviews) GetReviewOwner(_ context.Context, id uuid.UUID) (uuid.UUID, error) {
+	r, ok := f.rows[id]
+	if !ok {
+		return uuid.Nil, sql.ErrNoRows
+	}
+	return r.UserID, nil
 }
 
 func (f *fakeReviews) ListReviewsByTarget(_ context.Context, arg sqlc.ListReviewsByTargetParams) ([]sqlc.ListReviewsByTargetRow, error) {
@@ -356,7 +366,7 @@ func TestUpdateDeleteReviewAutorizacion(t *testing.T) {
 	if err := svc.Delete(context.Background(), owner, review.ID); err != nil {
 		t.Errorf("borrar propia: %v", err)
 	}
-	if _, err := svc.Get(context.Background(), review.ID); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := svc.Get(context.Background(), owner, review.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Errorf("tras borrar: esperaba ErrNotFound, obtuve %v", err)
 	}
 }
@@ -367,7 +377,7 @@ func TestListReviewsPaginacion(t *testing.T) {
 	albumID := uuid.New()
 	svc := NewReviewService(store, &fakeResolver{target: domain.Target{AlbumID: albumID}}, nil)
 
-	page, err := svc.List(context.Background(), domain.TargetAlbum, albumID.String(), 0, 3)
+	page, err := svc.List(context.Background(), uuid.New(), domain.TargetAlbum, albumID.String(), 0, 3)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -382,7 +392,7 @@ func TestListReviewsPaginacion(t *testing.T) {
 	}
 
 	for _, bad := range [][2]int{{51, 1}, {-1, 1}, {10, -1}, {50, 1 << 30}} {
-		_, err := svc.List(context.Background(), domain.TargetAlbum, albumID.String(), bad[0], bad[1])
+		_, err := svc.List(context.Background(), uuid.New(), domain.TargetAlbum, albumID.String(), bad[0], bad[1])
 		var validation *domain.ValidationError
 		if !errors.As(err, &validation) {
 			t.Errorf("limit=%d page=%d: esperaba ValidationError, obtuve %v", bad[0], bad[1], err)
@@ -448,7 +458,7 @@ func TestListReviewsResumeElObjetivoUnaVez(t *testing.T) {
 	}
 	svc := NewReviewService(store, resolver, summaries)
 
-	page, err := svc.List(context.Background(), domain.TargetSong, "1", 0, 0)
+	page, err := svc.List(context.Background(), uuid.New(), domain.TargetSong, "1", 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -483,7 +493,38 @@ func TestReviewErrorAlResumirSePropaga(t *testing.T) {
 	id, _ := store.CreateReview(context.Background(), sqlc.CreateReviewParams{UserID: uuid.New(), SongID: sql.NullInt32{Int32: 1, Valid: true}, Content: "Muy buena."})
 	svc := NewReviewService(store, &fakeResolver{}, &fakeSummarizer{err: errors.New("bd caída")})
 
-	if _, err := svc.Get(context.Background(), id); err == nil {
+	if _, err := svc.Get(context.Background(), uuid.New(), id); err == nil {
 		t.Fatal("esperaba error")
+	}
+}
+
+func TestReviewCamposSocialesSonDelViewer(t *testing.T) {
+	store := newFakeReviews()
+	author, viewer := uuid.New(), uuid.New()
+	svc := NewReviewService(store, &fakeResolver{target: domain.Target{SongID: 1}}, nil)
+	created, err := svc.Create(context.Background(), author, domain.TargetSong, "1", ReviewInput{Content: "Muy buena."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := store.rows[created.ID]
+	row.LikesCount, row.CommentsCount, row.LikedByMe, row.FollowingAuthor = 3, 2, true, true
+	store.rows[created.ID] = row
+
+	got, err := svc.Get(context.Background(), viewer, created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.lastViewer != viewer {
+		t.Fatalf("la consulta debía recibir al viewer: %v", store.lastViewer)
+	}
+	if got.LikesCount != 3 || got.CommentsCount != 2 || !got.LikedByMe || !got.FollowingAuthor || got.SavedByMe {
+		t.Fatalf("campos sociales inesperados: %+v", got)
+	}
+
+	if _, err := svc.List(context.Background(), viewer, domain.TargetSong, "1", 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if store.lastList.ViewerID != viewer {
+		t.Fatalf("el listado debía recibir al viewer: %+v", store.lastList)
 	}
 }

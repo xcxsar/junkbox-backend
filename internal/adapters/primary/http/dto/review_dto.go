@@ -22,3 +22,15 @@ type UpdateReviewRequest struct {
 	Title   *string `json:"title,omitempty"`
 	Content string  `json:"content"`
 }
+
+// CreateCommentRequest es el cuerpo de POST /api/v1/reviews/{id}/comments.
+// ParentID (UUID) convierte el comentario en una respuesta.
+type CreateCommentRequest struct {
+	Content  string  `json:"content"`
+	ParentID *string `json:"parent_id,omitempty"`
+}
+
+// UpdateCommentRequest es el cuerpo de PUT /api/v1/comments/{id}.
+type UpdateCommentRequest struct {
+	Content string `json:"content"`
+}

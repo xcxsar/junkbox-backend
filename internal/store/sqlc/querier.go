@@ -34,19 +34,34 @@ type Querier interface {
 	// un único UPDATE, dos peticiones concurrentes no pueden consumirlo dos veces.
 	ConsumeEmailToken(ctx context.Context, arg ConsumeEmailTokenParams) (uuid.UUID, error)
 	CountRecentEmailTokens(ctx context.Context, arg CountRecentEmailTokensParams) (int64, error)
+	CountReplies(ctx context.Context, parentID *uuid.UUID) (int64, error)
 	CountReviewsByTarget(ctx context.Context, arg CountReviewsByTargetParams) (int64, error)
 	CountSongs(ctx context.Context) (int64, error)
+	// Comentarios de reseñas (HOME-04). Hilos de un nivel: parent_id NULL es un
+	// raíz y las respuestas siempre cuelgan de un raíz. Un raíz borrado con
+	// respuestas queda con deleted_at y content NULL. Se listan del más
+	// antiguo al más nuevo con keyset sobre (created_at, id).
+	CreateComment(ctx context.Context, arg CreateCommentParams) (uuid.UUID, error)
 	// Reseñas (Fase 4). Una por usuario y objetivo; el índice único parcial
 	// rechaza la segunda con 23505. rating_score es el voto actual del autor
 	// sobre el mismo objetivo (NULL si no calificó).
 	// En los filtros por objetivo solo uno de song_id / album_id / artist_id
 	// llega con valor; las comparaciones con NULL se descartan.
+	// Las consultas que devuelven reseñas (aquí y en feed.sql) tienen las mismas
+	// columnas: el servicio convierte todas las filas a ListReviewsByTargetRow.
+	// liked_by_me y following_author son del usuario que pide (viewer_id).
 	CreateReview(ctx context.Context, arg CreateReviewParams) (uuid.UUID, error)
 	CreateUser(ctx context.Context, arg CreateUserParams) (CreateUserRow, error)
+	DeleteComment(ctx context.Context, id uuid.UUID) (int64, error)
+	// DeleteEmptyDeletedRoot borra un raíz ya eliminado que se quedó sin
+	// respuestas.
+	DeleteEmptyDeletedRoot(ctx context.Context, id uuid.UUID) error
 	DeleteRating(ctx context.Context, id uuid.UUID) (int64, error)
 	DeleteReview(ctx context.Context, id uuid.UUID) (int64, error)
 	EnqueueEmail(ctx context.Context, arg EnqueueEmailParams) error
 	ExistsUserByEmailOrUsername(ctx context.Context, arg ExistsUserByEmailOrUsernameParams) (bool, error)
+	// Seguir es idempotente: un segundo POST no falla.
+	FollowUser(ctx context.Context, arg FollowUserParams) error
 	GetAlbum(ctx context.Context, arg GetAlbumParams) (GetAlbumRow, error)
 	GetArtist(ctx context.Context, arg GetArtistParams) (GetArtistRow, error)
 	// --- Importación desde Spotify (CatalogImporter, dentro de una transacción) ---
@@ -54,6 +69,11 @@ type Querier interface {
 	// Medianas del catálogo para imputar los audio features que FreqBlog
 	// devuelve nulos (speechiness, liveness y a veces instrumentalness).
 	GetCatalogFeatureMedians(ctx context.Context) (GetCatalogFeatureMediansRow, error)
+	GetComment(ctx context.Context, id uuid.UUID) (GetCommentRow, error)
+	// Seguidores y Me gusta (HOME-04).
+	// GetPublicProfile acepta el UUID o el username; el otro se pasa vacío
+	// (uuid.Nil / ''). followed_by_me: viewer_id sigue a este usuario.
+	GetPublicProfile(ctx context.Context, arg GetPublicProfileParams) (GetPublicProfileRow, error)
 	GetRatingByID(ctx context.Context, id uuid.UUID) (Rating, error)
 	// Recomendaciones del feed de Inicio (HOME-01). Port de recommend_songs del
 	// notebook de ../recommendation-engine: similitud coseno (<=>) contra el
@@ -68,7 +88,9 @@ type Querier interface {
 	// calificaciones y reseñas de álbumes o artistas no cuentan.
 	GetRecommendationSeed(ctx context.Context, userID uuid.UUID) (GetRecommendationSeedRow, error)
 	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshToken, error)
-	GetReviewByID(ctx context.Context, id uuid.UUID) (GetReviewByIDRow, error)
+	GetReviewByID(ctx context.Context, arg GetReviewByIDParams) (GetReviewByIDRow, error)
+	GetReviewLikesCount(ctx context.Context, id uuid.UUID) (int32, error)
+	GetReviewOwner(ctx context.Context, id uuid.UUID) (uuid.UUID, error)
 	GetSongByTrackID(ctx context.Context, trackID sql.NullString) (GetSongByTrackIDRow, error)
 	// GetTrack acepta el id local o el track_id de Spotify; el otro se pasa
 	// vacío (0 / '') para que solo coincida uno de los dos índices.
@@ -86,14 +108,43 @@ type Querier interface {
 	InsertUserConsent(ctx context.Context, arg InsertUserConsentParams) error
 	InvalidateEmailTokens(ctx context.Context, arg InvalidateEmailTokensParams) error
 	IsAccessTokenRevoked(ctx context.Context, jti uuid.UUID) (bool, error)
+	// Me gusta idempotente. La reseña inexistente se detecta con
+	// GetReviewLikesCount (sin filas) antes de escribir.
+	LikeReview(ctx context.Context, arg LikeReviewParams) error
+	// Las listas paginan con keyset sobre (created_at, id del otro usuario),
+	// del seguimiento más reciente al más antiguo. followed_by_me es si
+	// viewer_id sigue a cada usuario de la lista.
+	ListFollowers(ctx context.Context, arg ListFollowersParams) ([]ListFollowersRow, error)
+	ListFollowing(ctx context.Context, arg ListFollowingParams) ([]ListFollowingRow, error)
+	// ListFollowingFeed ("Siguiendo"): reseñas de los usuarios que sigue
+	// viewer_id, de la más nueva a la más antigua.
+	ListFollowingFeed(ctx context.Context, arg ListFollowingFeedParams) ([]ListFollowingFeedRow, error)
+	// Feeds de reseñas de Inicio (HOME-04). Devuelven las mismas columnas que
+	// ListReviewsByTarget (reviews.sql). Paginan con keyset: se pide un
+	// elemento de más para saber si hay otra página, y el cursor es la última
+	// fila entregada. Todos los campos del cursor van juntos: si cursor_id es
+	// NULL se devuelve la primera página.
+	// ListPopularFeed ("Para ti"): reseñas de otros usuarios agrupadas por el día
+	// local de la zona tz (del más reciente al más antiguo) y, dentro de cada
+	// día, por popularity_score (Me gusta + 2·comentarios). El orden es
+	// (día, puntaje, fecha, id) descendente en todas las columnas, así que la
+	// comparación de filas con el cursor es un solo "<". cursor_day viaja como
+	// texto (AAAA-MM-DD) para que el driver no lo convierta de zona.
+	ListPopularFeed(ctx context.Context, arg ListPopularFeedParams) ([]ListPopularFeedRow, error)
 	// ListPopularTracks es el respaldo cuando el usuario no tiene semilla: las
 	// canciones más populares (Spotify) con embedding, sin lo que ya calificó o
 	// reseñó y sin repetir título y artista. Los candidatos salen de
 	// idx_song_metadata_popularity; se piden de más para que deduplicar no
 	// deje la lista corta.
 	ListPopularTracks(ctx context.Context, arg ListPopularTracksParams) ([]ListPopularTracksRow, error)
+	ListReplies(ctx context.Context, arg ListRepliesParams) ([]ListRepliesRow, error)
 	ListReviewsByTarget(ctx context.Context, arg ListReviewsByTargetParams) ([]ListReviewsByTargetRow, error)
+	ListRootComments(ctx context.Context, arg ListRootCommentsParams) ([]ListRootCommentsRow, error)
 	ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]ListTracksByAlbumRow, error)
+	// --- Borrado (postgres.CommentRemover, dentro de una transacción) ---
+	// LockComment bloquea el comentario: una respuesta nueva toma FOR KEY SHARE
+	// sobre su raíz y espera a que termine el borrado.
+	LockComment(ctx context.Context, id uuid.UUID) (LockCommentRow, error)
 	// Backoff exponencial: retry_base_seconds · 2^intentos.
 	MarkArtistEnrichmentFailed(ctx context.Context, arg MarkArtistEnrichmentFailedParams) error
 	MarkEmailFailed(ctx context.Context, arg MarkEmailFailedParams) error
@@ -118,6 +169,7 @@ type Querier interface {
 	// listas hasta llenar el LIMIT pero entrega un orden aproximado; el CTE
 	// materializado lo reordena por distancia (patrón de la doc. de pgvector).
 	RecommendSimilarTracks(ctx context.Context, arg RecommendSimilarTracksParams) ([]RecommendSimilarTracksRow, error)
+	ReviewExists(ctx context.Context, id uuid.UUID) (bool, error)
 	RevokeAccessToken(ctx context.Context, arg RevokeAccessTokenParams) error
 	RevokeAllRefreshTokensByUser(ctx context.Context, userID uuid.UUID) error
 	RevokeAllUserAccessTokens(ctx context.Context, userID uuid.UUID) error
@@ -139,10 +191,15 @@ type Querier interface {
 	// exponen: el servicio los usa para decidir qué completar con Spotify.
 	SearchTracksTrigram(ctx context.Context, arg SearchTracksTrigramParams) ([]SearchTracksTrigramRow, error)
 	SetRefreshTokenReplacedBy(ctx context.Context, arg SetRefreshTokenReplacedByParams) error
+	// SoftDeleteComment deja el raíz como "comentario eliminado".
+	SoftDeleteComment(ctx context.Context, id uuid.UUID) (int64, error)
+	UnfollowUser(ctx context.Context, arg UnfollowUserParams) error
+	UnlikeReview(ctx context.Context, arg UnlikeReviewParams) error
 	// --- Enriquecimiento con Spotify (imágenes de artistas y enlace de canciones del CSV) ---
 	// UpdateArtistEnrichment guarda lo que devolvió GET /v1/artists/{id} y marca
 	// al artista como consultado aunque Spotify no tenga imagen.
 	UpdateArtistEnrichment(ctx context.Context, arg UpdateArtistEnrichmentParams) (sql.NullString, error)
+	UpdateComment(ctx context.Context, arg UpdateCommentParams) (int64, error)
 	UpdateReview(ctx context.Context, arg UpdateReviewParams) (int64, error)
 	UpdateSongAudioFeaturesAndEmbedding(ctx context.Context, arg UpdateSongAudioFeaturesAndEmbeddingParams) (int64, error)
 	UpdateUserPassword(ctx context.Context, arg UpdateUserPasswordParams) error

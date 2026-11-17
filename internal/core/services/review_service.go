@@ -71,13 +71,13 @@ func (s *ReviewService) Create(ctx context.Context, userID uuid.UUID, targetType
 		}
 		return nil, fmt.Errorf("reviews: crear reseña: %w", err)
 	}
-	return s.Get(ctx, id)
+	return s.Get(ctx, userID, id)
 }
 
-// Get devuelve una reseña con su autor, el voto del autor y el resumen de
-// su objetivo.
-func (s *ReviewService) Get(ctx context.Context, id uuid.UUID) (*domain.Review, error) {
-	r, err := s.reviews.GetReviewByID(ctx, id)
+// Get devuelve una reseña con su autor, el voto del autor, el resumen de su
+// objetivo y los campos sociales vistos por viewerID.
+func (s *ReviewService) Get(ctx context.Context, viewerID, id uuid.UUID) (*domain.Review, error) {
+	r, err := s.reviews.GetReviewByID(ctx, sqlc.GetReviewByIDParams{ViewerID: viewerID, ID: id})
 	if err != nil {
 		return nil, notFoundOr(err, "reviews: obtener reseña")
 	}
@@ -92,7 +92,7 @@ func (s *ReviewService) Get(ctx context.Context, id uuid.UUID) (*domain.Review, 
 
 // List devuelve las reseñas del objetivo, las más recientes primero.
 // limit = 0 usa DefaultReviewLimit y page = 0 la primera página.
-func (s *ReviewService) List(ctx context.Context, targetType, targetID string, limit, page int) (*domain.ReviewPage, error) {
+func (s *ReviewService) List(ctx context.Context, viewerID uuid.UUID, targetType, targetID string, limit, page int) (*domain.ReviewPage, error) {
 	if limit == 0 {
 		limit = DefaultReviewLimit
 	}
@@ -117,6 +117,7 @@ func (s *ReviewService) List(ctx context.Context, targetType, targetID string, l
 		return nil, fmt.Errorf("reviews: contar reseñas: %w", err)
 	}
 	rows, err := s.reviews.ListReviewsByTarget(ctx, sqlc.ListReviewsByTargetParams{
+		ViewerID:   viewerID,
 		SongID:     songID,
 		AlbumID:    albumID,
 		ArtistID:   artistID,
@@ -168,7 +169,7 @@ func (s *ReviewService) Update(ctx context.Context, userID, id uuid.UUID, in Rev
 		// Otra petición la borró entre la lectura y el UPDATE.
 		return nil, domain.ErrNotFound
 	}
-	return s.Get(ctx, id)
+	return s.Get(ctx, userID, id)
 }
 
 // Delete borra una reseña del usuario. ErrNotFound si no existe y
@@ -190,10 +191,14 @@ func (s *ReviewService) Delete(ctx context.Context, userID, id uuid.UUID) error 
 // summary devuelve el resumen del objetivo, o nil si no hay summarizer o el
 // objetivo ya no existe.
 func (s *ReviewService) summary(ctx context.Context, target domain.Target) (any, error) {
-	if s.summaries == nil {
+	return targetSummary(ctx, s.summaries, target)
+}
+
+func targetSummary(ctx context.Context, summaries ports.TargetSummarizer, target domain.Target) (any, error) {
+	if summaries == nil {
 		return nil, nil
 	}
-	summary, err := s.summaries.SummarizeTarget(ctx, target)
+	summary, err := summaries.SummarizeTarget(ctx, target)
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
 		return nil, nil
@@ -206,11 +211,11 @@ func (s *ReviewService) summary(ctx context.Context, target domain.Target) (any,
 // checkOwner distingue "no existe" (404) de "no es tuya" (403) antes de
 // modificar una reseña.
 func (s *ReviewService) checkOwner(ctx context.Context, userID, id uuid.UUID) error {
-	r, err := s.reviews.GetReviewByID(ctx, id)
+	owner, err := s.reviews.GetReviewOwner(ctx, id)
 	if err != nil {
 		return notFoundOr(err, "reviews: obtener reseña")
 	}
-	if r.UserID != userID {
+	if owner != userID {
 		return domain.ErrForbidden
 	}
 	return nil
@@ -234,16 +239,20 @@ func normalizeReview(in ReviewInput) (sql.NullString, string, error) {
 	return title, content, nil
 }
 
-// reviewFromRow convierte una fila de reseña; GetReviewByIDRow tiene las
-// mismas columnas y se convierte a ListReviewsByTargetRow.
+// reviewFromRow convierte una fila de reseña; GetReviewByIDRow y las filas de
+// los feeds tienen las mismas columnas y se convierten a
+// ListReviewsByTargetRow.
 func reviewFromRow(r sqlc.ListReviewsByTargetRow) domain.Review {
 	return domain.Review{
-		ID:          r.ID,
-		Target:      targetRefFromColumns(r.SongID, r.AlbumID, r.ArtistID),
-		Title:       stringPtr(r.Title),
-		Content:     r.Content,
-		RatingScore: r.RatingScore,
-		LikesCount:  r.LikesCount,
+		ID:              r.ID,
+		Target:          targetRefFromColumns(r.SongID, r.AlbumID, r.ArtistID),
+		Title:           stringPtr(r.Title),
+		Content:         r.Content,
+		RatingScore:     r.RatingScore,
+		LikesCount:      r.LikesCount,
+		CommentsCount:   r.CommentsCount,
+		LikedByMe:       r.LikedByMe,
+		FollowingAuthor: r.FollowingAuthor,
 		Author: domain.ReviewAuthor{
 			ID:          r.UserID,
 			Username:    r.AuthorUsername,

@@ -50,6 +50,10 @@ type Config struct {
 	// Política de Privacidad; se guarda como aceptada en cada registro
 	// (default "2026-11-12"). Actualizarla al publicar documentos nuevos.
 	TermsVersion string
+	// FeedDefaultTimezone es la zona IANA con la que el feed "Para ti"
+	// agrupa las reseñas por día si el cliente no envía tz
+	// (default America/Mazatlan).
+	FeedDefaultTimezone string
 
 	// FrontendURL es el origen del frontend al que apuntan los enlaces de
 	// los correos (default: el primer origen de CORS_ALLOWED_ORIGINS).
@@ -105,8 +109,9 @@ func Load(envFile string) (*Config, error) {
 		SpotifyClientSecret: os.Getenv("SPOTIFY_CLIENT_SECRET"),
 		FreqBlogAPIKey:      os.Getenv("FREQBLOG_API_KEY"),
 
-		CORSAllowedOrigins: listOr("CORS_ALLOWED_ORIGINS", []string{"http://localhost:5173"}),
-		TermsVersion:       strings.TrimSpace(envOr("TERMS_VERSION", "2026-11-12")),
+		CORSAllowedOrigins:  listOr("CORS_ALLOWED_ORIGINS", []string{"http://localhost:5173"}),
+		TermsVersion:        strings.TrimSpace(envOr("TERMS_VERSION", "2026-11-12")),
+		FeedDefaultTimezone: strings.TrimSpace(envOr("FEED_DEFAULT_TIMEZONE", "America/Mazatlan")),
 
 		FrontendURL:  os.Getenv("FRONTEND_URL"),
 		MailDriver:   envOr("MAIL_DRIVER", MailDriverLog),
@@ -193,6 +198,9 @@ func (c *Config) validate() error {
 	// user_consents.version es VARCHAR(50).
 	if c.TermsVersion == "" || len(c.TermsVersion) > 50 {
 		return fmt.Errorf("config: TERMS_VERSION debe tener entre 1 y 50 caracteres")
+	}
+	if _, err := time.LoadLocation(c.FeedDefaultTimezone); err != nil || c.FeedDefaultTimezone == "" || c.FeedDefaultTimezone == "Local" {
+		return fmt.Errorf("config: FEED_DEFAULT_TIMEZONE debe ser una zona IANA válida (actual: %q)", c.FeedDefaultTimezone)
 	}
 	// Una lista vacía o un comodín abrirían la API a cualquier origen.
 	if len(c.CORSAllowedOrigins) == 0 {
