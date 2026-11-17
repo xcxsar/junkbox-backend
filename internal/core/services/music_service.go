@@ -67,13 +67,7 @@ func NewMusicService(catalog ports.CatalogStore, importer ports.CatalogImporter,
 	if threshold <= 0 {
 		threshold = DefaultFallbackThreshold
 	}
-	if enrich.Budget <= 0 {
-		enrich.Budget = DefaultEnrichBudget
-	}
-	if enrich.Concurrency <= 0 {
-		enrich.Concurrency = DefaultEnrichConcurrency
-	}
-	return &MusicService{catalog: catalog, importer: importer, provider: provider, queue: queue, threshold: threshold, enrich: enrich}
+	return &MusicService{catalog: catalog, importer: importer, provider: provider, queue: queue, threshold: threshold, enrich: enrich.withDefaults()}
 }
 
 // localResults es el resultado de una búsqueda local de cualquier tipo.
@@ -143,33 +137,14 @@ func (s *MusicService) Search(ctx context.Context, query, searchType string, lim
 // resultados, y los aplica. Lo que no termina a tiempo sale en null y pasa
 // al worker de respaldo. Nunca hace fallar la búsqueda.
 func (s *MusicService) enrichResults(ctx context.Context, r *localResults) {
-	if s.enrich.Enricher == nil || len(r.jobs) == 0 {
+	got, ok := resolveEnrichment(ctx, s.enrich, r.jobs)
+	if !ok {
 		return
-	}
-	got, left := s.enrich.Enricher.Resolve(ctx, r.jobs, s.enrich.Budget, s.enrich.Concurrency)
-	if len(left) > 0 && s.enrich.Fallback != nil {
-		s.enrich.Fallback.Enqueue(left...)
 	}
 
 	switch results := r.results.(type) {
 	case []domain.Track:
-		for i := range results {
-			t := &results[i]
-			artistID := r.trackArtists[i]
-			if song, ok := got.songs[t.SpotifyID]; ok {
-				if t.AlbumTitle == nil {
-					t.AlbumTitle = song.AlbumTitle
-				}
-				t.AlbumImageURL = song.AlbumImageURL
-				if song.ArtistImageURL != nil {
-					t.ArtistImageURL = song.ArtistImageURL
-				}
-				artistID = song.ArtistSpotifyID
-			}
-			if t.ArtistImageURL == nil {
-				t.ArtistImageURL = got.artistImages[artistID]
-			}
-		}
+		applyTrackEnrichment(results, r.trackArtists, got)
 	case []domain.Artist:
 		for i := range results {
 			a := &results[i]
@@ -231,14 +206,15 @@ func (s *MusicService) searchLocal(ctx context.Context, query, searchType string
 				PendingEmbedding: r.PendingEmbedding,
 			}
 			artists[i] = r.ArtistSpotifyID.String
-			// Las canciones del CSV no tienen álbum: enlazarlas trae la
-			// portada y reclama a su artista.
-			if r.AlbumID == nil && spotifyIDPattern.MatchString(r.TrackID.String) && r.LinkAttempts < MaxEnrichAttempts {
-				jobs = append(jobs, domain.EnrichmentJob{Kind: domain.EnrichTrack, SpotifyID: r.TrackID.String})
-			}
-			if !r.ArtistImageUrl.Valid && artistEnrichable(r.ArtistSpotifyID.String, r.ArtistEnriched, r.ArtistEnrichAttempts) {
-				jobs = append(jobs, domain.EnrichmentJob{Kind: domain.EnrichArtist, SpotifyID: r.ArtistSpotifyID.String})
-			}
+			jobs = append(jobs, trackEnrichmentState{
+				SpotifyID:            r.TrackID.String,
+				AlbumID:              r.AlbumID,
+				LinkAttempts:         r.LinkAttempts,
+				HasArtistImage:       r.ArtistImageUrl.Valid,
+				ArtistSpotifyID:      r.ArtistSpotifyID.String,
+				ArtistEnriched:       r.ArtistEnriched,
+				ArtistEnrichAttempts: r.ArtistEnrichAttempts,
+			}.jobs()...)
 		}
 		return localResults{results: out, count: len(out), best: bestScore(len(rows), func(i int) float64 { return rows[i].Score }), jobs: jobs, trackArtists: artists}, nil
 	}

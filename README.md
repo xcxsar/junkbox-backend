@@ -438,6 +438,7 @@ El backend utiliza tokens de acceso **JWT HS256** (15 minutos de vigencia) con c
 | `GET` | `/api/v1/reviews/{id}` | Bearer | Detalle de una reseña con su autor y el voto del autor |
 | `PUT` | `/api/v1/reviews/{id}` | Bearer | Edita una reseña del usuario |
 | `DELETE` | `/api/v1/reviews/{id}` | Bearer | Elimina una reseña del usuario |
+| `GET` | `/api/v1/home` | Bearer | Feed de Inicio: recomendaciones a partir de la última canción calificada o reseñada |
 
 ---
 
@@ -1087,6 +1088,59 @@ curl -i -X DELETE http://localhost:8080/api/v1/reviews/f5000000-0000-0000-0000-0
   "message": "reseña eliminada"
 }
 ```
+
+---
+
+#### 23. Feed de Inicio (`GET /api/v1/home`)
+Devuelve las secciones de la pantalla de Inicio. Por ahora hay una sola, "Hecho para tus oídos" (`made_for_you`), que usa la función `recommend_songs` de `../recommendation-engine`: canciones acústicamente parecidas (similitud coseno del embedding) a la **última canción que el usuario calificó o reseñó**, del mismo género si esa canción lo tiene en el catálogo. No incluye la semilla, sus duplicados ni lo que el usuario ya calificó o reseñó. Si el usuario no tiene semilla, responde las canciones más populares (`strategy: "popular"`, `seed: null`). Las imágenes que faltan se completan con Spotify antes de responder, igual que en la búsqueda.
+
+**Parámetros (query):**
+- `limit` (int, opcional): cantidad de elementos, de 1 a 50. Default 8.
+
+```bash
+curl -s "http://localhost:8080/api/v1/home?limit=8" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+**Respuesta (`200 OK`):**
+```json
+{
+  "sections": [
+    {
+      "id": "made_for_you",
+      "title": "Hecho para tus oídos",
+      "strategy": "similar_to_last",
+      "seed": {
+        "id": 1083842,
+        "spotify_id": "5M9kio8FEFiNKyTDGqksy2",
+        "track_name": "The Bomb Dot Com V2.0",
+        "artist_name": "Sleeping With Sirens",
+        "genre": "emo"
+      },
+      "items": [
+        {
+          "type": "track",
+          "id": 807823,
+          "spotify_id": "44jzGaVQytNHTFAqI2ANPg",
+          "track_name": "Just Tonight - Demo Version",
+          "artist_name": "Jimmy Eat World",
+          "album_title": "Futures (Deluxe Edition)",
+          "album_image_url": "https://i.scdn.co/image/ab67616d0000b273f7d76f56dcec489d92bcfffc",
+          "artist_image_url": "https://i.scdn.co/image/ab6761610000e5ebe223ff60b74bbc40b04ce46c",
+          "year": 2004,
+          "genre": "emo",
+          "popularity": 23,
+          "duration_ms": 218040,
+          "has_embedding": true,
+          "pending_embedding": false
+        }
+      ]
+    }
+  ]
+}
+```
+
+Cada elemento lleva `type` (por ahora siempre `track`) y los mismos campos que una canción de la búsqueda. Decisiones y casos en [`docs/solicitudes.md` (HOME-01)](docs/solicitudes.md) y detalle técnico en [`implementacion.md` §9](implementacion.md#9-home-01-recomendaciones-del-feed-de-inicio).
 
 ---
 

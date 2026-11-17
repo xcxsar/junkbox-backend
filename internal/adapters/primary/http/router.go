@@ -21,7 +21,10 @@ type RouterOptions struct {
 	// rutas no se montan.
 	Ratings *RatingHandler
 	Reviews *ReviewHandler
-	JWT     chimw.JWTValidator
+	// Home expone el feed de Inicio (recomendaciones). Si es nil, la ruta
+	// no se monta.
+	Home *HomeHandler
+	JWT  chimw.JWTValidator
 	// Revocation comprueba la denylist y el corte global en cada petición
 	// autenticada. Si es nil, se omite la comprobación (tests).
 	Revocation chimw.TokenRevocation
@@ -89,6 +92,9 @@ func NewRouter(opts RouterOptions) http.Handler {
 				r.Get("/reviews/{id}", opts.Reviews.Get)
 				r.Put("/reviews/{id}", opts.Reviews.Update)
 				r.Delete("/reviews/{id}", opts.Reviews.Delete)
+			}
+			if opts.Home != nil {
+				r.Get("/home", opts.Home.Home)
 			}
 		})
 	})

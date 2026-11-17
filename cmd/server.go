@@ -127,6 +127,7 @@ func runServer(cmd *cobra.Command) {
 	musicSvc := services.NewMusicService(queries, importer, provider, queue, cfg.SearchFallbackThreshold, enrich)
 	ratingSvc := services.NewRatingService(queries, musicSvc)
 	reviewSvc := services.NewReviewService(queries, musicSvc)
+	recommendationSvc := services.NewRecommendationService(postgres.NewRecommendationStore(db), enrich)
 
 	// 5. Purga periódica de la denylist, los tokens de correo y el outbox.
 	go purgeRevokedTokens(ctx, queries)
@@ -140,6 +141,7 @@ func runServer(cmd *cobra.Command) {
 		Account:        httpapi.NewAccountHandler(accountSvc),
 		Ratings:        httpapi.NewRatingHandler(ratingSvc),
 		Reviews:        httpapi.NewReviewHandler(reviewSvc),
+		Home:           httpapi.NewHomeHandler(recommendationSvc),
 		JWT:            jwtManager,
 		Revocation:     revocationChecker,
 		AllowedOrigins: cfg.CORSAllowedOrigins,

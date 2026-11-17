@@ -59,6 +59,14 @@ Este documento establece la especificación técnica, diseño de arquitectura y 
   - [8.8 Automatización con `Makefile`](#88-automatización-con-makefile)
   - [8.9 Decisiones](#89-decisiones)
   - [8.10 Verificación](#810-verificación)
+- [9. HOME-01: Recomendaciones del Feed de Inicio](#9-home-01-recomendaciones-del-feed-de-inicio)
+  - [9.1 Origen: el Motor de `../recommendation-engine`](#91-origen-el-motor-de-recommendation-engine)
+  - [9.2 Flujo de `GET /api/v1/home`](#92-flujo-de-get-apiv1home)
+  - [9.3 Consultas SQL (`db/queries/recommendations.sql`)](#93-consultas-sql-dbqueriesrecommendationssql)
+  - [9.4 IVFFlat con Filtro de Género: `iterative_scan`](#94-ivfflat-con-filtro-de-género-iterative_scan)
+  - [9.5 Código](#95-código)
+  - [9.6 Decisiones](#96-decisiones)
+  - [9.7 Verificación](#97-verificación)
 
 ---
 
@@ -2804,3 +2812,126 @@ Qué debe pasar:
 
 - **Correo:** al pedir `POST /api/v1/auth/password/forgot`, llega **un** solo correo a Mailpit (`http://localhost:8025`).
 - **Embeddings:** tras una búsqueda que importa canciones desde Spotify (`source: spotify_fallback`), en Postgres `pending_embedding` pasa a `FALSE` en pocos segundos. Mientras una réplica tiene reservado un pendiente, su `next_embedding_attempt_at` queda unos 5 min en el futuro, así que las demás no lo toman. El test `TestRescanReservaConLeaseYNoReservaEnPausa` cubre la reserva.
+
+---
+
+## 9. HOME-01: Recomendaciones del Feed de Inicio
+
+La sección "Hecho para tus oídos" del frontend usaba una plantilla fija de 8 canciones, igual para todos. `GET /api/v1/home` la reemplaza con recomendaciones del motor de contenido. Las decisiones de producto y el contrato para el frontend están en [`docs/solicitudes.md` (HOME-01)](docs/solicitudes.md); aquí se documenta la implementación.
+
+### 9.1 Origen: el Motor de `../recommendation-engine`
+
+El notebook `recommendation_engine.ipynb` define `recommend_songs(track_name, artist_name, top_k, genre, min_year, max_year)`:
+
+1. Busca la canción objetivo y lee su `embedding` (10 dimensiones, ver §2.8).
+2. Ordena el catálogo por distancia coseno (`embedding <=> objetivo`), excluye el propio objetivo y, si se pasa `genre`, filtra por género (también admite rango de años).
+
+El backend no llama al notebook: la función es una sola consulta SQL y se portó a `db/queries/recommendations.sql` (Go + sqlc), sobre la misma tabla `song_metadata` y el mismo índice. Diferencias con el notebook:
+
+- La semilla se identifica por `id` (no por título y artista, que tienen homónimos).
+- El género se compara con `=` y no con `LOWER(...)`: el valor viene del mismo catálogo y así se puede usar `idx_song_metadata_genre`.
+- Se excluyen también los duplicados de la semilla (mismo título y artista con otro `track_id`) y lo que el usuario ya calificó o reseñó.
+- No se usan los filtros de año.
+
+### 9.2 Flujo de `GET /api/v1/home`
+
+```
+GET /home ──► GetRecommendationSeed(user)
+                 │ última canción calificada o reseñada, con embedding (updated_at DESC)
+                 ├─ sin semilla ───────────────────────────────► ListPopularTracks ─► strategy=popular
+                 └─ semilla ─► RecommendSimilarTracks(genre = seed.genre | NULL)
+                                 ├─ 0 filas y había género ─► repetir sin género
+                                 └─ 0 filas ─────────────────► ListPopularTracks ─► strategy=popular
+                                 └─ filas ─► strategy=similar_to_last, seed
+              ──► imágenes que faltan: CatalogEnricher.Resolve (presupuesto) + worker de respaldo (§4.8)
+```
+
+- **Semilla.** Unión de `ratings` y `reviews` del usuario con `song_id` no nulo, ordenada por `updated_at`. Los votos y reseñas de álbumes o artistas no cuentan. Si la canción más reciente no tiene embedding (importada de Spotify y aún pendiente en el worker de §4.5), la consulta toma la siguiente que sí lo tenga.
+- **Género.** Solo `song_metadata.genre` (82 géneros del CSV). Las canciones importadas no tienen género y usan la variante sin filtro.
+- **Populares.** Por `popularity` (Spotify), sin lo que el usuario ya calificó o reseñó y sin repetir título y artista.
+- **Imágenes.** El mismo enriquecimiento síncrono acotado que la búsqueda (§4.8). Se extrajo a `internal/core/services/track_enrichment.go` y lo comparten `MusicService` y `RecommendationService`.
+
+### 9.3 Consultas SQL (`db/queries/recommendations.sql`)
+
+| Query | Qué hace |
+|---|---|
+| `GetRecommendationSeed` | Última canción con embedding que el usuario calificó o reseñó. Devuelve el embedding como texto (`embedding::text`), porque sqlc no conoce el tipo `vector` |
+| `RecommendSimilarTracks` | Port de `recommend_songs`. CTE `MATERIALIZED` con los `max_results` más cercanos y reordenado final por distancia. `genre` NULL desactiva el filtro |
+| `ListPopularTracks` | Respaldo. Toma `max_results × 4` candidatos del índice de popularidad, deduplica por título y artista, y devuelve los `max_results` más populares |
+
+Las dos consultas de canciones devuelven exactamente las mismas columnas (las de `SearchTracksTrigram` sin `score`), así que el servicio convierte `RecommendSimilarTracksRow` en `ListPopularTracksRow` y usa un solo mapeo.
+
+Migración `20261116000009_add_popularity_index.sql`: índice parcial `idx_song_metadata_popularity (popularity DESC NULLS LAST, id) WHERE embedding IS NOT NULL`. Sin él, ordenar las 1.16M filas por popularidad tardaba **~630 ms**; con él, `ListPopularTracks` tarda **~12 ms**. Se crea en ~1 s.
+
+### 9.4 IVFFlat con Filtro de Género: `iterative_scan`
+
+El índice `idx_song_metadata_embedding_ivfflat` (`lists = 1000`, §2.8) revisa por defecto una sola lista (`ivfflat.probes = 1`, ~1.160 canciones) y **después** aplica el `WHERE`. Con un filtro de género casi todos los candidatos se descartan:
+
+| Consulta (semilla `id = 1000`, `LIMIT 8`) | Resultados | Tiempo |
+|---|---|---|
+| Sin género | 8 | ~1 ms |
+| `genre = 'rock'`, configuración por defecto | **1** | ~65 ms |
+| `genre = 'rock'`, `ivfflat.iterative_scan = relaxed_order` | 8 | ~2,5 ms |
+
+pgvector 0.8 (la imagen usa 0.8.7) añade el *iterative index scan*: si después de filtrar faltan filas para el `LIMIT`, sigue revisando listas. `relaxed_order` puede entregar las filas un poco desordenadas, por eso la consulta las reordena por distancia fuera del CTE materializado (es el patrón que recomienda la documentación de pgvector).
+
+El ajuste se aplica solo a esta consulta: `postgres.RecommendationStore.RecommendSimilarTracks` abre una transacción de solo lectura, ejecuta `SET LOCAL ivfflat.iterative_scan = relaxed_order` y luego la consulta. `SET LOCAL` termina con la transacción, así que la conexión vuelve al pool sin el cambio y la búsqueda no se ve afectada.
+
+Alternativas descartadas: búsqueda exacta dentro del género (desactivar el índice vectorial; resultados exactos, pero cientos de ms y depende del planificador) y subir `ivfflat.probes` (no garantiza llenar el `LIMIT` en géneros pequeños y hay que calibrarlo).
+
+### 9.5 Código
+
+| Capa | Archivo |
+|---|---|
+| Dominio | `internal/core/domain/recommendation.go`: `HomeFeed`, `HomeSection`, `RecommendationSeed`, `HomeItem` (`type` + `Track` embebido, para que el JSON quede plano) |
+| Puerto | `internal/core/ports/recommendation_ports.go`: `RecommendationStore` |
+| Adaptador secundario | `internal/adapters/secondary/postgres/recommendation_store.go` (transacción con `iterative_scan`) |
+| Servicio | `internal/core/services/recommendation_service.go`: `RecommendationService.Home` (semilla, reintento sin género, respaldo a populares, imágenes) |
+| Enriquecimiento compartido | `internal/core/services/track_enrichment.go` |
+| Adaptador primario | `internal/adapters/primary/http/handlers_home.go`; ruta `GET /home` en el grupo protegido de `router.go` (`RouterOptions.Home`). `parseLimit` lo comparte con la búsqueda |
+| Cableado | `cmd/server.go`: `services.NewRecommendationService(postgres.NewRecommendationStore(db), enrich)`, con la misma configuración de enriquecimiento que la búsqueda |
+
+### 9.6 Decisiones
+
+| Tema | Elegido | Alternativas consideradas |
+|---|---|---|
+| Contrato | `GET /home` con `sections` (propuesta de HOME-01) + `strategy` y `seed` | `GET /recommendations` plano; ambos endpoints |
+| Semilla | Solo canciones; `updated_at` | Derivar una canción de un álbum o artista calificado; `created_at` |
+| Sin semilla utilizable | Retroceder a la anterior con embedding y luego populares | Lista vacía; usar solo la última |
+| Género | `song_metadata.genre` | Géneros del artista en Spotify (otra taxonomía, casi nunca coinciden) |
+| Índice con filtro | `iterative_scan = relaxed_order` en una transacción | Búsqueda exacta en el género; subir `probes` |
+| Filtros extra | Duplicados de la semilla y lo ya calificado o reseñado | Deduplicar también entre resultados; ninguno (literal) |
+| Imágenes | Enriquecimiento síncrono acotado como en la búsqueda | Solo lo que ya esté en BD (tarjetas sin imagen al principio) |
+| Ubicación | `RecommendationService` propio | Método de `MusicService`; microservicio Python con el notebook (otro despliegue en el camino de la petición) |
+| Respaldo | `popularity` de Spotify | Mejor calificadas en Junkbox (hoy casi no hay votos) |
+
+**Limitación conocida:** las canciones importadas desde Spotify tienen embeddings calculados con FreqBlog, que no están del todo en la escala del CSV (§4.5). Con una de ellas como semilla, las recomendaciones son menos acertadas (en la prueba manual, una canción importada de Sleeping With Sirens devolvió sobre todo `chicago-house`).
+
+**Siguiente paso:** el criterio SMART §4.1 prevé recomendaciones por lotes. El reemplazo natural es calcular un perfil por usuario (promedio de los embeddings de sus canciones ponderado por calificación) en un proceso periódico y usarlo en lugar de la última canción; solo cambiaría `RecommendationService` y sus consultas, no el contrato.
+
+### 9.7 Verificación
+
+```bash
+make migrate-up && make sqlc && go test ./...
+make run-server
+
+ACCESS_TOKEN=$(curl -s -X POST http://localhost:8080/api/v1/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"identifier":"omar_delangel","password":"Password123!"}' | jq -r .access_token)
+
+# Sin actividad: populares
+curl -s http://localhost:8080/api/v1/home -H "Authorization: Bearer $ACCESS_TOKEN" | jq '.sections[0] | {strategy, seed}'
+
+# Calificar una canción con género y volver a pedir el feed: similares del mismo género
+curl -s -X POST http://localhost:8080/api/v1/ratings -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "Content-Type: application/json" -d '{"target_type":"song","target_id":"1083842","score":4.5}'
+curl -s http://localhost:8080/api/v1/home -H "Authorization: Bearer $ACCESS_TOKEN" \
+  | jq '.sections[0] | {strategy, seed, genres: [.items[].genre]}'
+```
+
+Qué debe pasar:
+
+- Sin actividad: `strategy: "popular"` y `seed: null`.
+- Tras calificar la canción `1083842` (género `emo`): `strategy: "similar_to_last"`, `seed.id = 1083842` y 8 canciones `emo`, sin la semilla.
+- `?limit=0` o `?limit=51` → `400`; sin Bearer → `401`.
+- Tests: `recommendation_service_test.go` y `handlers_home_test.go`.

@@ -55,6 +55,18 @@ type Querier interface {
 	// devuelve nulos (speechiness, liveness y a veces instrumentalness).
 	GetCatalogFeatureMedians(ctx context.Context) (GetCatalogFeatureMediansRow, error)
 	GetRatingByID(ctx context.Context, id uuid.UUID) (Rating, error)
+	// Recomendaciones del feed de Inicio (HOME-01). Port de recommend_songs del
+	// notebook de ../recommendation-engine: similitud coseno (<=>) contra el
+	// embedding de una canción semilla, con filtro opcional de género.
+	// El embedding viaja como texto ('[a,b,...]'): sqlc no conoce el tipo vector.
+	// Las columnas de las canciones son las de SearchTracksTrigram (sin score)
+	// para poder completar imágenes igual que la búsqueda, y son idénticas en
+	// RecommendSimilarTracks y ListPopularTracks: el servicio convierte una fila
+	// en la otra.
+	// GetRecommendationSeed devuelve la canción con embedding que el usuario
+	// calificó o reseñó más recientemente (por updated_at: editar cuenta). Las
+	// calificaciones y reseñas de álbumes o artistas no cuentan.
+	GetRecommendationSeed(ctx context.Context, userID uuid.UUID) (GetRecommendationSeedRow, error)
 	GetRefreshTokenByHash(ctx context.Context, tokenHash string) (RefreshToken, error)
 	GetReviewByID(ctx context.Context, id uuid.UUID) (GetReviewByIDRow, error)
 	GetSongByTrackID(ctx context.Context, trackID sql.NullString) (GetSongByTrackIDRow, error)
@@ -74,6 +86,12 @@ type Querier interface {
 	InsertUserConsent(ctx context.Context, arg InsertUserConsentParams) error
 	InvalidateEmailTokens(ctx context.Context, arg InvalidateEmailTokensParams) error
 	IsAccessTokenRevoked(ctx context.Context, jti uuid.UUID) (bool, error)
+	// ListPopularTracks es el respaldo cuando el usuario no tiene semilla: las
+	// canciones más populares (Spotify) con embedding, sin lo que ya calificó o
+	// reseñó y sin repetir título y artista. Los candidatos salen de
+	// idx_song_metadata_popularity; se piden de más para que deduplicar no
+	// deje la lista corta.
+	ListPopularTracks(ctx context.Context, arg ListPopularTracksParams) ([]ListPopularTracksRow, error)
 	ListReviewsByTarget(ctx context.Context, arg ListReviewsByTargetParams) ([]ListReviewsByTargetRow, error)
 	ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]ListTracksByAlbumRow, error)
 	// Backoff exponencial: retry_base_seconds · 2^intentos.
@@ -91,6 +109,15 @@ type Querier interface {
 	PurgeExpiredRevokedTokens(ctx context.Context) (int64, error)
 	// PurgeOldOutbox borra los correos ya resueltos: contienen enlaces con token.
 	PurgeOldOutbox(ctx context.Context) (int64, error)
+	// RecommendSimilarTracks excluye la semilla, sus duplicados (mismo título y
+	// artista con otro track_id) y lo que el usuario ya calificó o reseñó.
+	// Con genre NULL no filtra por género.
+	// El índice IVFFlat solo revisa ivfflat.probes listas: con un filtro de
+	// género puede devolver menos de max_results. El adaptador ejecuta esta
+	// consulta con ivfflat.iterative_scan = relaxed_order, que sigue revisando
+	// listas hasta llenar el LIMIT pero entrega un orden aproximado; el CTE
+	// materializado lo reordena por distancia (patrón de la doc. de pgvector).
+	RecommendSimilarTracks(ctx context.Context, arg RecommendSimilarTracksParams) ([]RecommendSimilarTracksRow, error)
 	RevokeAccessToken(ctx context.Context, arg RevokeAccessTokenParams) error
 	RevokeAllRefreshTokensByUser(ctx context.Context, userID uuid.UUID) error
 	RevokeAllUserAccessTokens(ctx context.Context, userID uuid.UUID) error
