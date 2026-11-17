@@ -282,3 +282,21 @@ type UserEmailToken struct {
 	UsedAt    sql.NullTime      `json:"used_at"`
 	CreatedAt time.Time         `json:"created_at"`
 }
+
+type UserSuggestion struct {
+	UserID          uuid.UUID       `json:"user_id"`
+	SuggestedID     uuid.UUID       `json:"suggested_id"`
+	Rank            int32           `json:"rank"`
+	Kind            string          `json:"kind"`
+	CommonCount     int32           `json:"common_count"`
+	CommonArtistIds []uuid.UUID     `json:"common_artist_ids"`
+	Similarity      sql.NullFloat64 `json:"similarity"`
+	ComputedAt      time.Time       `json:"computed_at"`
+}
+
+type UserTasteProfile struct {
+	UserID     uuid.UUID   `json:"user_id"`
+	Embedding  interface{} `json:"embedding"`
+	Items      int32       `json:"items"`
+	ComputedAt time.Time   `json:"computed_at"`
+}

@@ -467,3 +467,83 @@ Un raíz borrado que tiene respuestas sale como `deleted: true` y `content: null
 
 - `go test ./...`: `feed_service_test.go` (cursor de ida y vuelta, día local del cursor, última página, un resumen por objetivo, "Siguiendo", validaciones de `tab`, `tz`, cursor y `limit`), `social_service_test.go`, `comment_service_test.go`, `TestReviewCamposSocialesSonDelViewer`, `TestRutasSocialesRequierenBearer` y `TestFeedDefaultTimezone`. La migración aplica y revierte (`migrate-down`/`up`).
 - Prueba manual contra Postgres con los usuarios del seed (`implementacion.md` §10.7): orden por día y puntaje, exclusión de las propias, recorrido completo con `limit=1`, "Siguiendo" antes y después de seguir, errores `400` y borrado lógico. Los datos de prueba se borraron.
+
+---
+
+### HOME-05 · Sugerencias de usuarios ("Conecta por lo que suena")
+
+- **Estado:** Resuelta · **Fecha:** 2026-11-16
+- **Responsable:** Backend
+
+#### Qué se pidió
+
+El panel de escritorio sugiere usuarios con gustos parecidos ("También escucha Hoke") con un botón Seguir. No había usuarios públicos ni seguidores en la API. Se propuso `GET /api/v1/users/suggestions?limit=…` → `{ id, username, display_name, avatar_url, reason }`.
+
+#### Decisión
+
+Se implementó `GET /api/v1/users/suggestions` con el contrato propuesto. `reason` es un objeto, con el texto listo para mostrar y los datos para armar otro. Los perfiles y seguidores ya existían desde HOME-04.
+
+- **"Gustos parecidos"** combina dos señales:
+  1. **Artistas en común:** artistas que ambos calificaron con 3.5 o más (al artista, a un álbum suyo o a una canción suya). Van primero; más artistas en común = más arriba.
+  2. **Perfil acústico:** el promedio de los embeddings de las canciones y álbumes que cada uno calificó con 3.5 o más (el mismo motor de recomendaciones de HOME-01). Rellena con usuarios sin artistas en común.
+- **"Le gusta"** es una calificación de 3.5 o más. Las reseñas sin voto no cuentan.
+- **Respaldo:** si no hay suficientes coincidencias, se completa con los usuarios con más seguidores ("Popular en JunkBox"). Así el panel nunca sale vacío, ni siquiera para un usuario nuevo.
+- **Cálculo por lotes:** el servidor recalcula al arrancar y cada hora (`SUGGESTIONS_REFRESH_INTERVAL`); `make suggestions-refresh` lo fuerza. Al leer se quitan los usuarios que ya sigues, así que seguir a alguien lo saca del panel al instante.
+- Nunca se sugiere al propio usuario ni a quien ya sigue.
+
+#### Contrato de la API
+
+`GET /api/v1/users/suggestions?limit=5` (Bearer). `limit` de 1 a 50, default 10.
+
+```json
+{
+  "limit": 5,
+  "computed_at": "2026-11-17T05:26:49Z",
+  "users": [
+    {
+      "id": "b2000000-0000-0000-0000-000000000002",
+      "username": "carlos_andrade",
+      "display_name": "Carlos Eduardo Andrade Gámez",
+      "avatar_url": "https://api.dicebear.com/7.x/bottts/svg?seed=carlos",
+      "reason": {
+        "type": "common_artists",
+        "text": "También escucha Coldplay",
+        "common_count": 1,
+        "artists": [ { "id": "c028925a-aa66-4c16-8c9f-61ec2accfc31", "name": "Coldplay", "image_url": null } ],
+        "similarity": 0.872
+      }
+    }
+  ]
+}
+```
+
+| `reason.type` | `reason.text` | Otros campos |
+| --- | --- | --- |
+| `common_artists` | "También escucha Hoke" / "… Hoke y Feid" / "… Hoke, Feid y 3 más" | `common_count`, `artists` (hasta 3, los más populares), `similarity` |
+| `similar_taste` | "Gustos parecidos a los tuyos" | `similarity` (0 a 1) |
+| `popular` | "Popular en JunkBox" | — |
+
+| Caso | Respuesta |
+| --- | --- |
+| Usuario con gustos registrados | `200`, primero las personalizadas, luego populares hasta `limit` |
+| Usuario nuevo o sin calificaciones ≥ 3.5 | `200`, solo populares, `computed_at: null` |
+| `limit` no entero, `0` o fuera de 1–50 | `400` |
+| Sin Bearer | `401` |
+
+#### Qué tiene que hacer el frontend
+
+1. Mostrar el panel con `GET /users/suggestions?limit=<n>`. Usar `reason.text` tal cual o componer otro texto con `reason.artists` (`name`, `image_url`).
+2. Botón Seguir: `POST /users/{id}/follow` (HOME-04). Quitar la tarjeta en el momento; al volver a pedir la lista ya no aparece.
+3. `artists[].image_url` puede ser `null` (no se piden fotos a Spotify en esta ruta): usar un placeholder.
+4. Las sugerencias personalizadas cambian como mucho cada hora; no hace falta pedirlas a cada rato.
+
+#### Pendiente / fuera de alcance
+
+- Recalcular a un usuario en cuanto califica (hoy espera a la siguiente ronda horaria).
+- Escalar el cálculo con un índice vectorial si crece el número de usuarios (`implementacion.md` §11.2).
+- El username `suggestions` queda reservado de hecho: `/users/suggestions` es esta ruta, así que ese perfil solo se abre por UUID.
+
+#### Verificación
+
+- `go test ./...`: `suggestion_service_test.go` (textos del motivo, relleno con populares sin repetir, usuario sin cálculo, `limit`, umbral del cálculo), `TestRutasSocialesRequierenBearer` y `TestSuggestionsRefreshInterval`. La migración aplica y revierte.
+- Prueba manual contra Postgres con los usuarios del seed (`implementacion.md` §11.6): artistas en común primero, luego perfil acústico y populares; seguir a alguien lo quita sin recalcular; un usuario sin gustos recibe populares. Los datos de prueba se borraron.

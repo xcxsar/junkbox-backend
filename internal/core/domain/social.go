@@ -87,3 +87,49 @@ type CommentPage struct {
 	NextCursor *string    `json:"next_cursor"`
 	Comments   []Comment  `json:"comments"`
 }
+
+// Tipos de motivo de una sugerencia de usuario (GET /users/suggestions).
+const (
+	// SuggestionCommonArtists: ambos calificaron con 3.5 o más a los mismos
+	// artistas (directamente, o a un álbum o canción suyos).
+	SuggestionCommonArtists = "common_artists"
+	// SuggestionSimilarTaste: perfiles acústicos cercanos, sin artistas en
+	// común.
+	SuggestionSimilarTaste = "similar_taste"
+	// SuggestionPopular: relleno con los usuarios con más seguidores.
+	SuggestionPopular = "popular"
+)
+
+// SuggestionPage es la respuesta de GET /users/suggestions. ComputedAt es
+// cuándo se calcularon las sugerencias personalizadas (nil si el usuario
+// aún no tiene, p. ej. recién registrado).
+type SuggestionPage struct {
+	Limit      int              `json:"limit"`
+	ComputedAt *time.Time       `json:"computed_at"`
+	Users      []UserSuggestion `json:"users"`
+}
+
+// UserSuggestion es un usuario sugerido con el motivo.
+type UserSuggestion struct {
+	ReviewAuthor
+	Reason SuggestionReason `json:"reason"`
+}
+
+// SuggestionReason explica la sugerencia. Text es el texto listo para
+// mostrar ("También escucha Hoke"). Artists (hasta 3, los más populares) y
+// CommonCount solo aplican a common_artists; Similarity (0 a 1) a
+// common_artists y similar_taste cuando ambos tienen perfil acústico.
+type SuggestionReason struct {
+	Type        string             `json:"type"`
+	Text        string             `json:"text"`
+	CommonCount int32              `json:"common_count"`
+	Artists     []SuggestionArtist `json:"artists"`
+	Similarity  *float64           `json:"similarity"`
+}
+
+// SuggestionArtist es un artista en común en el motivo de una sugerencia.
+type SuggestionArtist struct {
+	ID       uuid.UUID `json:"id"`
+	Name     string    `json:"name"`
+	ImageURL *string   `json:"image_url"`
+}

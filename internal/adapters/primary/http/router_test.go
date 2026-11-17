@@ -107,6 +107,7 @@ func TestRutasSocialesRequierenBearer(t *testing.T) {
 	id := "f5000000-0000-0000-0000-000000000001"
 	routes := []struct{ method, path string }{
 		{http.MethodGet, "/api/v1/feed?tab=popular"},
+		{http.MethodGet, "/api/v1/users/suggestions"},
 		{http.MethodGet, "/api/v1/users/cesar_beltran"},
 		{http.MethodPost, "/api/v1/users/cesar_beltran/follow"},
 		{http.MethodDelete, "/api/v1/users/cesar_beltran/follow"},

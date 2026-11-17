@@ -16,14 +16,15 @@ import (
 // seguidores, los Me gusta y los comentarios (HOME-04). Todas sus rutas
 // requieren AuthMiddleware.
 type SocialHandler struct {
-	feed     *services.FeedService
-	social   *services.SocialService
-	comments *services.CommentService
+	feed        *services.FeedService
+	social      *services.SocialService
+	comments    *services.CommentService
+	suggestions *services.SuggestionService
 }
 
 // NewSocialHandler crea el handler.
-func NewSocialHandler(feed *services.FeedService, social *services.SocialService, comments *services.CommentService) *SocialHandler {
-	return &SocialHandler{feed: feed, social: social, comments: comments}
+func NewSocialHandler(feed *services.FeedService, social *services.SocialService, comments *services.CommentService, suggestions *services.SuggestionService) *SocialHandler {
+	return &SocialHandler{feed: feed, social: social, comments: comments, suggestions: suggestions}
 }
 
 // Feed: GET /api/v1/feed?tab=popular|following&tz=&cursor=&limit=
@@ -39,6 +40,25 @@ func (h *SocialHandler) Feed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page, err := h.feed.Feed(r.Context(), claims.UserID, q.Get("tab"), q.Get("tz"), q.Get("cursor"), limit)
+	if err != nil {
+		writeServiceError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
+}
+
+// Suggestions: GET /api/v1/users/suggestions?limit=
+func (h *SocialHandler) Suggestions(w http.ResponseWriter, r *http.Request) {
+	claims, ok := middleware.ClaimsFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "no autorizado")
+		return
+	}
+	limit, ok := parseLimit(w, r.URL.Query().Get("limit"), services.MaxSuggestionLimit)
+	if !ok {
+		return
+	}
+	page, err := h.suggestions.Suggestions(r.Context(), claims.UserID, limit)
 	if err != nil {
 		writeServiceError(w, err)
 		return

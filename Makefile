@@ -1,4 +1,4 @@
-.PHONY: db-up db-down db-ps db-logs db-reset db-shell migrate-up migrate-down migrate-status migrate-create seed-create seed-up seed-down ingest-songs backfill-artists sqlc build vet test run-server
+.PHONY: db-up db-down db-ps db-logs db-reset db-shell migrate-up migrate-down migrate-status migrate-create seed-create seed-up seed-down ingest-songs backfill-artists sqlc build vet test run-server suggestions-refresh
 
 DB_COMPOSE := docker compose -f db/docker-compose.yml --env-file .env
 GOOSE_CMD := set -a; . ./.env; set +a; goose -dir db/migrations postgres "$$DATABASE_URL"
@@ -97,3 +97,7 @@ test:
 
 run-server:
 	@go run . server --config .env
+
+# Recalcula ahora las sugerencias de usuarios (el servidor lo hace cada SUGGESTIONS_REFRESH_INTERVAL).
+suggestions-refresh:
+	@go run . suggestions refresh --config .env

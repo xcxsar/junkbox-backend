@@ -54,6 +54,9 @@ type Config struct {
 	// agrupa las reseñas por día si el cliente no envía tz
 	// (default America/Mazatlan).
 	FeedDefaultTimezone string
+	// SuggestionsRefreshInterval es cada cuánto el worker recalcula las
+	// sugerencias de usuarios (default 1h).
+	SuggestionsRefreshInterval time.Duration
 
 	// FrontendURL es el origen del frontend al que apuntan los enlaces de
 	// los correos (default: el primer origen de CORS_ALLOWED_ORIGINS).
@@ -143,6 +146,12 @@ func Load(envFile string) (*Config, error) {
 	}
 	cfg.SearchFallbackThreshold = threshold
 
+	suggestionsInterval, err := durationOr("SUGGESTIONS_REFRESH_INTERVAL", time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	cfg.SuggestionsRefreshInterval = suggestionsInterval
+
 	enrichBudget, err := durationOr("SEARCH_ENRICH_BUDGET", 2*time.Second)
 	if err != nil {
 		return nil, err
@@ -194,6 +203,9 @@ func (c *Config) validate() error {
 	}
 	if c.SearchEnrichBudget <= 0 {
 		return fmt.Errorf("config: SEARCH_ENRICH_BUDGET debe ser positivo")
+	}
+	if c.SuggestionsRefreshInterval < time.Minute {
+		return fmt.Errorf("config: SUGGESTIONS_REFRESH_INTERVAL debe ser de al menos 1m")
 	}
 	// user_consents.version es VARCHAR(50).
 	if c.TermsVersion == "" || len(c.TermsVersion) > 50 {

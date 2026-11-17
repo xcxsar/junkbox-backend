@@ -65,6 +65,13 @@ Este documento establece la especificación técnica, diseño de arquitectura y 
   - [10.5 Código](#105-código)
   - [10.6 Decisiones](#106-decisiones)
   - [10.7 Verificación](#107-verificación)
+- [11. HOME-05: Sugerencias de Usuarios](#11-home-05-sugerencias-de-usuarios)
+  - [11.1 Señales y Orden](#111-señales-y-orden)
+  - [11.2 Cálculo por Lotes](#112-cálculo-por-lotes)
+  - [11.3 Lectura](#113-lectura)
+  - [11.4 Código](#114-código)
+  - [11.5 Decisiones](#115-decisiones)
+  - [11.6 Verificación](#116-verificación)
 
 ---
 
@@ -2791,3 +2798,81 @@ Con los usuarios del seed (A = `cesar_beltran`, B = `carlos_andrade`, C = `omar_
 6. Borrar el raíz con respuestas lo deja como `deleted: true` y `comments_count` baja de 3 a 2.
 
 Resultado de la prueba del 2026-11-16: todo coincidió. Los datos de prueba se borraron al final.
+
+---
+
+## 11. HOME-05: Sugerencias de Usuarios
+
+El panel de escritorio "Conecta por lo que suena" sugiere usuarios con gustos parecidos, con un motivo ("También escucha Hoke") y un botón Seguir. `GET /api/v1/users/suggestions` lo alimenta. Los perfiles públicos y los seguidores existen desde HOME-04 (§10). El contrato para el frontend está en [`docs/solicitudes.md` (HOME-05)](docs/solicitudes.md) y el ejemplo, en el README (endpoint 28).
+
+### 11.1 Señales y Orden
+
+"Le gusta" es una **calificación de 3.5 o más** (`SuggestionMinScore`). Las reseñas sin voto no cuentan.
+
+1. **Artistas en común** (`common_artists`). Un artista le gusta a un usuario si calificó con ≥ 3.5 al artista, a un álbum suyo (`albums.artist_id`) o a una canción suya (`song_metadata.artist_id`). Dos usuarios comparten tantos artistas como coincidencias haya. Más artistas en común = más arriba; el desempate es la similitud acústica.
+2. **Perfil acústico** (`similar_taste`). Promedio de los embeddings de 10 dimensiones (§2.8) de las canciones y álbumes que calificó con ≥ 3.5, ponderado por la calificación. Un álbum aporta el promedio de sus pistas con embedding como un solo elemento. Los usuarios sin artistas en común se ordenan por similitud coseno (`1 - (a <=> b)`).
+3. **Populares** (`popular`). Se calculan al leer: sirven para completar la lista y para los usuarios sin cálculo.
+
+### 11.2 Cálculo por Lotes
+
+`postgres.SuggestionRefresher.RefreshSuggestions` reconstruye, en **una transacción**, `user_taste_profiles` y `user_suggestions` (migración `20261117000011_create_user_suggestions.sql`). Así el endpoint nunca ve las tablas a medio llenar. Todo es SQL (`db/queries/suggestions.sql`):
+
+- `InsertTasteProfiles` expande cada embedding (`embedding::real[]` con `unnest … WITH ORDINALITY`), calcula la media ponderada por dimensión y la vuelve a armar como `vector`.
+- `InsertSuggestions` cruza los artistas que le gustan a cada usuario (`common`) y compara todos los perfiles entre sí (`acoustic`). Une ambos con `FULL JOIN`, numera con `row_number()` y guarda hasta 100 por usuario: se guardan de más porque al leer se quitan los que ya sigue. `common_artist_ids` guarda los 3 artistas en común más populares, para el texto.
+
+Lo ejecuta `SuggestionWorker` dentro del servidor, al arrancar y cada `SUGGESTIONS_REFRESH_INTERVAL` (default 1 h, mínimo 1 min). También `junkbox-backend suggestions refresh` (`make suggestions-refresh`). El proyecto corre con una sola instancia (§8), así que no hace falta coordinar varias ejecuciones. Un error se registra en el log y se siguen sirviendo las sugerencias anteriores. Con los datos del seed tarda ~80 ms.
+
+**Limitación conocida:** `acoustic` compara cada par de usuarios (O(n²)) y `common` hace un self-join de los artistas que les gustan. Con el volumen del proyecto basta. Con miles de usuarios activos habría que acotarlo: un índice vectorial sobre `user_taste_profiles` (k vecinos por usuario) y un tope de artistas por usuario.
+
+### 11.3 Lectura
+
+`SuggestionService.Suggestions`:
+
+1. `ListSuggestionsForUser` lee las precalculadas en orden y quita a los que el usuario ya sigue (`NOT EXISTS follows`). Seguir a alguien lo saca del panel sin esperar al recálculo. Las filas de usuarios borrados desaparecen por `ON DELETE CASCADE`.
+2. `ListArtistsByIDs` trae, en una sola consulta, los nombres y fotos de los artistas en común de toda la página.
+3. Si faltan elementos para llegar a `limit`, `ListPopularUsers` completa con los usuarios con más seguidores (desempate: más reseñas), sin el propio usuario, sin los que sigue y sin los ya sugeridos. Un usuario nuevo, sin fila precalculada, recibe solo populares (`computed_at: null`).
+
+El texto del motivo se arma en el servicio: "También escucha A", "También escucha A y B" y "También escucha A, B y N más". Para `similar_taste`, "Gustos parecidos a los tuyos"; para los populares, "Popular en JunkBox". La ruta fija `/users/suggestions` se registra antes que `/users/{id}`; chi la prefiere, así que un usuario llamado `suggestions` solo es accesible por UUID.
+
+### 11.4 Código
+
+| Capa | Archivo |
+|---|---|
+| Esquema | `db/migrations/20261117000011_create_user_suggestions.sql` (`user_taste_profiles`, `user_suggestions`) |
+| Queries | `db/queries/suggestions.sql` |
+| Dominio | `SuggestionPage`, `UserSuggestion`, `SuggestionReason`, `SuggestionArtist` en `internal/core/domain/social.go` |
+| Puertos | `SuggestionStore` y `SuggestionRefresher` en `internal/core/ports/social_ports.go` |
+| Servicio y worker | `internal/core/services/suggestion_service.go` |
+| Adaptadores | `postgres/suggestion_store.go`; `SocialHandler.Suggestions` en `http/handlers_social.go` |
+| CLI y configuración | `cmd/suggestions.go`, `make suggestions-refresh`, `SUGGESTIONS_REFRESH_INTERVAL` |
+
+### 11.5 Decisiones
+
+| Tema | Elegido | Alternativas consideradas |
+|---|---|---|
+| Señal | Híbrida: artistas en común y, después, perfil acústico | Solo artistas (pocos usuarios coinciden con pocos datos); solo perfil acústico (motivo vago) |
+| Combinación | Artistas primero; el perfil acústico rellena | Puntaje ponderado (pesos arbitrarios; el motivo tendría que elegir una señal) |
+| "Le gusta" | Calificación ≥ 3.5 | Incluir las reseñas (una reseña negativa contaría como interés) |
+| Perfil acústico | Canciones y álbumes | Solo canciones |
+| Respaldo | Completar con populares | Solo personalizadas (panel vacío para usuarios nuevos) |
+| `reason` | Estructurado + texto | Solo texto |
+| Cálculo | Por lotes: worker en el servidor + subcomando | Al pedirlo (más costoso con más usuarios); solo cron externo |
+| Frescura | Filtrar los seguidos al leer; populares para quien no tiene cálculo | Recalcular a un usuario al calificar |
+
+### 11.6 Verificación
+
+```bash
+make migrate-up && make sqlc && go test ./...
+make run-server
+```
+
+Con los usuarios del seed (2026-11-16):
+
+1. César califica *Paradise* (Coldplay) con 5. Carlos, *Hymn for the Weekend* (Coldplay) con 4.5. Omar, una pieza clásica con 4. Raymundo, *Clocks* (Coldplay) con 2.0, que no cuenta como "le gusta".
+2. `make suggestions-refresh` → `3 perfiles acústicos y 6 sugerencias`.
+3. `GET /users/suggestions?limit=5` como César: Carlos (`common_artists`, "También escucha Coldplay"), Omar (`similar_taste`), y Raymundo y otros como `popular`.
+4. `POST /users/carlos_andrade/follow` y se repite la consulta: Carlos ya no aparece, sin recalcular.
+5. Como Raymundo (sin gustos): solo populares y `computed_at: null`.
+6. `limit=0` → `400`; sin Bearer → `401`. `GET /users/omar_delangel` sigue funcionando.
+
+Al final se borraron las calificaciones y el seguimiento de prueba y se recalculó.

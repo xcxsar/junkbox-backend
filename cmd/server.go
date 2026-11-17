@@ -130,6 +130,12 @@ func runServer(cmd *cobra.Command) {
 	feedSvc := services.NewFeedService(queries, musicSvc, cfg.FeedDefaultTimezone)
 	socialSvc := services.NewSocialService(queries)
 	commentSvc := services.NewCommentService(queries, postgres.NewCommentRemover(db))
+	suggestionSvc := services.NewSuggestionService(queries, postgres.NewSuggestionRefresher(db))
+	suggestionsDone := make(chan struct{})
+	go func() {
+		defer close(suggestionsDone)
+		services.NewSuggestionWorker(suggestionSvc, cfg.SuggestionsRefreshInterval).Run(ctx)
+	}()
 
 	// 5. Purga periódica de la denylist, los tokens de correo y el outbox.
 	go purgeRevokedTokens(ctx, queries)
@@ -142,7 +148,7 @@ func runServer(cmd *cobra.Command) {
 		Ratings:        httpapi.NewRatingHandler(ratingSvc),
 		Reviews:        httpapi.NewReviewHandler(reviewSvc),
 		Home:           httpapi.NewHomeHandler(recommendationSvc),
-		Social:         httpapi.NewSocialHandler(feedSvc, socialSvc, commentSvc),
+		Social:         httpapi.NewSocialHandler(feedSvc, socialSvc, commentSvc, suggestionSvc),
 		JWT:            jwtManager,
 		Revocation:     revocationChecker,
 		AllowedOrigins: cfg.CORSAllowedOrigins,
@@ -171,6 +177,7 @@ func runServer(cmd *cobra.Command) {
 	<-workerDone
 	<-enrichDone
 	<-outboxDone
+	<-suggestionsDone
 	log.Println("servidor detenido")
 }
 

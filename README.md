@@ -265,6 +265,11 @@ Para reconstruirlo en cualquier entorno limpio, sin copiar volúmenes Docker a m
   ```
   *(Ejecuta `go run . server --config .env`; por defecto escucha en `http://localhost:8080`)*.
 
+- **Recalcular las sugerencias de usuarios ahora** (el servidor lo hace al arrancar y cada `SUGGESTIONS_REFRESH_INTERVAL`, 1 h por defecto):
+  ```bash
+  make suggestions-refresh
+  ```
+
 ---
 
 ## Puesta en Marcha Rápida
@@ -347,6 +352,7 @@ El backend utiliza tokens de acceso **JWT HS256** (15 minutos de vigencia) con c
 | `DELETE` | `/api/v1/reviews/{id}` | Bearer | Elimina una reseña del usuario |
 | `GET` | `/api/v1/home` | Bearer | Feed de Inicio: recomendaciones a partir de la última canción calificada o reseñada |
 | `GET` | `/api/v1/feed` | Bearer | Feed de reseñas "Para ti" (por día y popularidad) o "Siguiendo", con cursor |
+| `GET` | `/api/v1/users/suggestions` | Bearer | Usuarios sugeridos por gustos parecidos ("Conecta por lo que suena") |
 | `GET` | `/api/v1/users/{id}` | Bearer | Perfil público (UUID o username) con contadores de seguidores |
 | `POST` | `/api/v1/users/{id}/follow` | Bearer | Seguir a un usuario |
 | `DELETE` | `/api/v1/users/{id}/follow` | Bearer | Dejar de seguir a un usuario |
@@ -1248,6 +1254,66 @@ Listados:
 ```json
 { "review_id": "…", "parent_id": null, "limit": 20, "next_cursor": null, "comments": [ { "…": "…" } ] }
 ```
+
+---
+
+#### 28. Sugerencias de Usuarios (`GET /api/v1/users/suggestions`)
+Usuarios con gustos parecidos para el panel "Conecta por lo que suena", con el motivo de cada sugerencia. No incluye al propio usuario ni a los que ya sigue.
+
+El orden es:
+
+1. **Artistas en común** (`common_artists`): usuarios que calificaron con 3.5 o más a los mismos artistas que tú (al artista, a un álbum suyo o a una canción suya). Más artistas en común = más arriba.
+2. **Gustos parecidos** (`similar_taste`): usuarios cuyo perfil acústico (promedio de los embeddings de lo que calificaron con 3.5 o más) se parece al tuyo, sin artistas en común.
+3. **Populares** (`popular`): se completa hasta `limit` con los usuarios con más seguidores.
+
+Las dos primeras se calculan por lotes al arrancar el servidor y cada `SUGGESTIONS_REFRESH_INTERVAL` (1 h; `make suggestions-refresh` lo fuerza). `computed_at` dice cuándo; es `null` si aún no tienes sugerencias personalizadas, por ejemplo, porque todavía no calificaste nada con 3.5 o más. Seguir a alguien lo saca de la lista al instante, sin esperar al recálculo.
+
+**Parámetros (query):**
+- `limit` (opcional): de 1 a 50, default 10.
+
+```bash
+curl -s "http://localhost:8080/api/v1/users/suggestions?limit=5" \
+  -H "Authorization: Bearer $ACCESS_TOKEN"
+```
+
+**Respuesta (`200 OK`):**
+```json
+{
+  "limit": 5,
+  "computed_at": "2026-11-17T05:26:49Z",
+  "users": [
+    {
+      "id": "b2000000-0000-0000-0000-000000000002",
+      "username": "carlos_andrade",
+      "display_name": "Carlos Eduardo Andrade Gámez",
+      "avatar_url": "https://api.dicebear.com/7.x/bottts/svg?seed=carlos",
+      "reason": {
+        "type": "common_artists",
+        "text": "También escucha Coldplay",
+        "common_count": 1,
+        "artists": [ { "id": "c028925a-aa66-4c16-8c9f-61ec2accfc31", "name": "Coldplay", "image_url": null } ],
+        "similarity": 0.872
+      }
+    },
+    {
+      "id": "b3000000-0000-0000-0000-000000000003",
+      "username": "omar_delangel",
+      "display_name": "Omar Del Angel Villa",
+      "avatar_url": "https://api.dicebear.com/7.x/bottts/svg?seed=omar",
+      "reason": { "type": "similar_taste", "text": "Gustos parecidos a los tuyos", "common_count": 0, "artists": [], "similarity": 0.393 }
+    },
+    {
+      "id": "b4000000-0000-0000-0000-000000000004",
+      "username": "raymundo_sanchez",
+      "display_name": "José Raymundo Sánchez Alcalde",
+      "avatar_url": "https://api.dicebear.com/7.x/bottts/svg?seed=raymundo",
+      "reason": { "type": "popular", "text": "Popular en JunkBox", "common_count": 0, "artists": [], "similarity": null }
+    }
+  ]
+}
+```
+
+`reason.text` está listo para mostrar: "También escucha Hoke", "También escucha Hoke y Feid" o "También escucha Hoke, Feid y 3 más". `artists` trae hasta 3 artistas en común (los más populares), por si el panel quiere armar otro texto o mostrar sus fotos. `similarity` va de 0 a 1 y es `null` si alguno de los dos no tiene perfil acústico. Las fotos de los artistas (`image_url`) salen de la base de datos tal cual; esta ruta no las pide a Spotify, así que pueden ser `null`.
 
 ---
 

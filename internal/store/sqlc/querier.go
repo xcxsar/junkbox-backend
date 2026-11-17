@@ -48,6 +48,14 @@ type Querier interface {
 	DeleteEmptyDeletedRoot(ctx context.Context, id uuid.UUID) error
 	DeleteRating(ctx context.Context, id uuid.UUID) (int64, error)
 	DeleteReview(ctx context.Context, id uuid.UUID) (int64, error)
+	DeleteSuggestions(ctx context.Context) error
+	// Sugerencias de usuarios (HOME-05). El cálculo por lotes reconstruye las
+	// dos tablas dentro de una transacción (postgres.SuggestionStore):
+	// primero los perfiles acústicos y luego las sugerencias, que los usan.
+	// "Le gusta" es una calificación >= min_score (3.5); las reseñas sin voto
+	// no cuentan.
+	// --- Cálculo por lotes ---
+	DeleteTasteProfiles(ctx context.Context) error
 	EnqueueEmail(ctx context.Context, arg EnqueueEmailParams) error
 	ExistsUserByEmailOrUsername(ctx context.Context, arg ExistsUserByEmailOrUsernameParams) (bool, error)
 	// Los filtros los usa solo el worker de respaldo: de los IDs que recibió,
@@ -100,12 +108,25 @@ type Querier interface {
 	GetUserRating(ctx context.Context, arg GetUserRatingParams) (Rating, error)
 	InsertEmailToken(ctx context.Context, arg InsertEmailTokenParams) error
 	InsertRefreshToken(ctx context.Context, arg InsertRefreshTokenParams) (RefreshToken, error)
+	// InsertSuggestions arma, para cada usuario, hasta max_per_user
+	// sugerencias: primero quienes comparten artistas que les gustan (más
+	// artistas en común = más arriba; desempate por similitud acústica) y luego
+	// quienes solo tienen un perfil acústico cercano. Un artista "le gusta" si
+	// calificó con >= min_score al artista, a un álbum suyo o a una canción
+	// suya. Compara todos los perfiles entre sí: con muchos usuarios habría que
+	// acotarlo con un índice vectorial.
+	InsertSuggestions(ctx context.Context, arg InsertSuggestionsParams) (int64, error)
+	// InsertTasteProfiles promedia, dimensión por dimensión, los embeddings de
+	// lo que le gusta a cada usuario, ponderados por la calificación. Un álbum
+	// aporta el promedio de sus pistas como un solo elemento.
+	InsertTasteProfiles(ctx context.Context, minScore float64) (int64, error)
 	InsertUserConsent(ctx context.Context, arg InsertUserConsentParams) error
 	InvalidateEmailTokens(ctx context.Context, arg InvalidateEmailTokensParams) error
 	IsAccessTokenRevoked(ctx context.Context, jti uuid.UUID) (bool, error)
 	// Me gusta idempotente. La reseña inexistente se detecta con
 	// GetReviewLikesCount (sin filas) antes de escribir.
 	LikeReview(ctx context.Context, arg LikeReviewParams) error
+	ListArtistsByIDs(ctx context.Context, ids []uuid.UUID) ([]ListArtistsByIDsRow, error)
 	// Las listas paginan con keyset sobre (created_at, id del otro usuario),
 	// del seguimiento más reciente al más antiguo. followed_by_me es si
 	// viewer_id sigue a cada usuario de la lista.
@@ -134,9 +155,17 @@ type Querier interface {
 	// idx_song_metadata_popularity; se piden de más para que deduplicar no
 	// deje la lista corta.
 	ListPopularTracks(ctx context.Context, arg ListPopularTracksParams) ([]ListPopularTracksRow, error)
+	// ListPopularUsers completa la lista: los usuarios con más seguidores
+	// (desempate: más reseñas), sin viewer_id, sin los que ya sigue y sin los
+	// de exclude_ids (ya sugeridos).
+	ListPopularUsers(ctx context.Context, arg ListPopularUsersParams) ([]ListPopularUsersRow, error)
 	ListReplies(ctx context.Context, arg ListRepliesParams) ([]ListRepliesRow, error)
 	ListReviewsByTarget(ctx context.Context, arg ListReviewsByTargetParams) ([]ListReviewsByTargetRow, error)
 	ListRootComments(ctx context.Context, arg ListRootCommentsParams) ([]ListRootCommentsRow, error)
+	// --- Lectura (GET /users/suggestions) ---
+	// ListSuggestionsForUser devuelve las sugerencias precalculadas sin los
+	// usuarios que viewer_id ya sigue (seguir a alguien lo saca al instante).
+	ListSuggestionsForUser(ctx context.Context, arg ListSuggestionsForUserParams) ([]ListSuggestionsForUserRow, error)
 	ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]ListTracksByAlbumRow, error)
 	// --- Borrado (postgres.CommentRemover, dentro de una transacción) ---
 	// LockComment bloquea el comentario: una respuesta nueva toma FOR KEY SHARE

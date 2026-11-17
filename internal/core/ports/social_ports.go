@@ -43,3 +43,17 @@ type CommentStore interface {
 type CommentRemover interface {
 	RemoveComment(ctx context.Context, id uuid.UUID) (soft bool, err error)
 }
+
+// SuggestionStore son las lecturas de las sugerencias de usuarios.
+type SuggestionStore interface {
+	ListSuggestionsForUser(ctx context.Context, arg sqlc.ListSuggestionsForUserParams) ([]sqlc.ListSuggestionsForUserRow, error)
+	ListPopularUsers(ctx context.Context, arg sqlc.ListPopularUsersParams) ([]sqlc.ListPopularUsersRow, error)
+	ListArtistsByIDs(ctx context.Context, ids []uuid.UUID) ([]sqlc.ListArtistsByIDsRow, error)
+}
+
+// SuggestionRefresher recalcula en una transacción los perfiles acústicos y
+// las sugerencias de todos los usuarios. Devuelve cuántos perfiles y
+// sugerencias quedaron.
+type SuggestionRefresher interface {
+	RefreshSuggestions(ctx context.Context, minScore float64, maxPerUser int32) (profiles, suggestions int64, err error)
+}

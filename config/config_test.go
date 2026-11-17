@@ -4,6 +4,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func setRequired(t *testing.T) {
@@ -150,6 +151,24 @@ func TestFeedDefaultTimezone(t *testing.T) {
 		t.Setenv("FEED_DEFAULT_TIMEZONE", v)
 		if _, err := Load(""); err == nil {
 			t.Errorf("esperaba error para FEED_DEFAULT_TIMEZONE=%q", v)
+		}
+	}
+}
+
+func TestSuggestionsRefreshInterval(t *testing.T) {
+	setRequired(t)
+	t.Setenv("SUGGESTIONS_REFRESH_INTERVAL", "")
+	cfg, err := Load("")
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.SuggestionsRefreshInterval != time.Hour {
+		t.Errorf("SUGGESTIONS_REFRESH_INTERVAL default = %s", cfg.SuggestionsRefreshInterval)
+	}
+	for _, v := range []string{"30s", "-1h", "nada"} {
+		t.Setenv("SUGGESTIONS_REFRESH_INTERVAL", v)
+		if _, err := Load(""); err == nil {
+			t.Errorf("esperaba error para SUGGESTIONS_REFRESH_INTERVAL=%q", v)
 		}
 	}
 }

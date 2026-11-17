@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -31,13 +32,16 @@ func (f *fakeResolver) ResolveTarget(_ context.Context, targetType, _ string) (d
 }
 
 // fakeSummarizer devuelve un resumen por tipo de objetivo y cuenta las
-// llamadas.
+// llamadas. El feed lo llama desde varias goroutines.
 type fakeSummarizer struct {
+	mu    sync.Mutex
 	err   error
 	calls []domain.Target
 }
 
 func (f *fakeSummarizer) SummarizeTarget(_ context.Context, target domain.Target) (any, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.calls = append(f.calls, target)
 	if f.err != nil {
 		return nil, f.err
