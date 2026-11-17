@@ -547,3 +547,35 @@ Se implementó `GET /api/v1/users/suggestions` con el contrato propuesto. `reaso
 
 - `go test ./...`: `suggestion_service_test.go` (textos del motivo, relleno con populares sin repetir, usuario sin cálculo, `limit`, umbral del cálculo), `TestRutasSocialesRequierenBearer` y `TestSuggestionsRefreshInterval`. La migración aplica y revierte.
 - Prueba manual contra Postgres con los usuarios del seed (`implementacion.md` §11.6): artistas en común primero, luego perfil acústico y populares; seguir a alguien lo quita sin recalcular; un usuario sin gustos recibe populares. Los datos de prueba se borraron.
+
+---
+
+### HOME-06 · Vista previa de audio
+
+- **Estado:** Descartada · **Fecha:** 2026-11-16
+- **Responsable:** Backend y Producto
+
+#### Qué se pidió
+
+`MiniPlayer`, `SnippetPlayer` ("Fragmento · 30 s") y el botón QuickPlay de `MusicCard` reproducen audio, pero ninguna respuesta trae una URL de vista previa, y Spotify dejó de enviar `preview_url` a las apps nuevas. Se pidió decidir si habría reproducción y de qué fuente, y en ese caso añadir `preview_url: string | null` a `TrackSummary`.
+
+#### Decisión
+
+Se descarta. El 2026-11-06 el propietario decidió reproducir **canciones completas con el Web Playback SDK de Spotify** (requiere Premium), a partir del enlace de cuenta de Configuración (SPOT-01). Con eso, la vista previa de 30 s deja de ser necesaria para el reproductor.
+
+- No se añade `preview_url` a `TrackSummary`. Además, Spotify ya no lo envía a esta app, así que el campo saldría siempre `null`.
+- Para reproducir, el frontend ya tiene `spotify_id` en `TrackSummary` y `TrackDetail`, que es lo que necesita el SDK (`spotify:track:<spotify_id>`).
+
+#### Qué tiene que hacer el frontend
+
+1. Mantener ocultos `SnippetPlayer` ("Fragmento · 30 s") y el QuickPlay decorativo hasta que exista el reproductor del SDK.
+2. Conectar `MiniPlayer` y QuickPlay al Web Playback SDK cuando se resuelva SPOT-01, usando `spotify_id`.
+
+#### Pendiente / fuera de alcance
+
+- SPOT-01 (enlace de la cuenta de Spotify y token de usuario para el SDK) se atiende como solicitud aparte.
+- Una canción importada de un dataset sin `spotify_id` válido no se podrá reproducir; hoy todas las del catálogo tienen el ID de Spotify.
+
+#### Verificación
+
+- Sin cambios de código.
