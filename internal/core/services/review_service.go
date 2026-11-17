@@ -3,6 +3,7 @@ package services
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -27,13 +28,14 @@ const (
 
 // ReviewService implementa las reseñas de canciones, álbumes y artistas.
 type ReviewService struct {
-	reviews ports.ReviewStore
-	targets ports.TargetResolver
+	reviews   ports.ReviewStore
+	targets   ports.TargetResolver
+	summaries ports.TargetSummarizer // nil: las reseñas salen sin target.summary
 }
 
-// NewReviewService crea el servicio.
-func NewReviewService(reviews ports.ReviewStore, targets ports.TargetResolver) *ReviewService {
-	return &ReviewService{reviews: reviews, targets: targets}
+// NewReviewService crea el servicio. summaries puede ser nil.
+func NewReviewService(reviews ports.ReviewStore, targets ports.TargetResolver, summaries ports.TargetSummarizer) *ReviewService {
+	return &ReviewService{reviews: reviews, targets: targets, summaries: summaries}
 }
 
 // ReviewInput son los campos editables de una reseña. Title vacío o nil
@@ -72,13 +74,19 @@ func (s *ReviewService) Create(ctx context.Context, userID uuid.UUID, targetType
 	return s.Get(ctx, id)
 }
 
-// Get devuelve una reseña con su autor y el voto del autor.
+// Get devuelve una reseña con su autor, el voto del autor y el resumen de
+// su objetivo.
 func (s *ReviewService) Get(ctx context.Context, id uuid.UUID) (*domain.Review, error) {
 	r, err := s.reviews.GetReviewByID(ctx, id)
 	if err != nil {
 		return nil, notFoundOr(err, "reviews: obtener reseña")
 	}
 	out := reviewFromRow(sqlc.ListReviewsByTargetRow(r))
+	summary, err := s.summary(ctx, targetFromColumns(r.SongID, r.AlbumID, r.ArtistID))
+	if err != nil {
+		return nil, err
+	}
+	out.Target.Summary = summary
 	return &out, nil
 }
 
@@ -119,12 +127,21 @@ func (s *ReviewService) List(ctx context.Context, targetType, targetID string, l
 		return nil, fmt.Errorf("reviews: listar reseñas: %w", err)
 	}
 
+	// Todas las reseñas de la página son del mismo objetivo: el resumen se
+	// resuelve una vez y se repite en cada una.
+	summary, err := s.summary(ctx, target)
+	if err != nil {
+		return nil, err
+	}
 	reviews := make([]domain.Review, len(rows))
 	for i, r := range rows {
 		reviews[i] = reviewFromRow(r)
+		reviews[i].Target.Summary = summary
 	}
+	ref := target.Ref()
+	ref.Summary = summary
 	return &domain.ReviewPage{
-		Target:  target.Ref(),
+		Target:  ref,
 		Page:    page,
 		Limit:   limit,
 		Count:   len(reviews),
@@ -168,6 +185,22 @@ func (s *ReviewService) Delete(ctx context.Context, userID, id uuid.UUID) error 
 		return domain.ErrNotFound
 	}
 	return nil
+}
+
+// summary devuelve el resumen del objetivo, o nil si no hay summarizer o el
+// objetivo ya no existe.
+func (s *ReviewService) summary(ctx context.Context, target domain.Target) (any, error) {
+	if s.summaries == nil {
+		return nil, nil
+	}
+	summary, err := s.summaries.SummarizeTarget(ctx, target)
+	switch {
+	case errors.Is(err, domain.ErrNotFound):
+		return nil, nil
+	case err != nil:
+		return nil, fmt.Errorf("reviews: resumir objetivo: %w", err)
+	}
+	return summary, nil
 }
 
 // checkOwner distingue "no existe" (404) de "no es tuya" (403) antes de

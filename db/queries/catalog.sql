@@ -68,7 +68,11 @@ SELECT
     al.title AS album_title,
     al.image_url AS album_image_url,
     ar.image_url AS artist_image_url,
-    s.ratings_count, s.avg_rating
+    s.ratings_count, s.avg_rating,
+    ar.spotify_id AS artist_spotify_id,
+    (ar.enriched_at IS NOT NULL)::bool AS artist_enriched,
+    coalesce(ar.enrich_attempts, 0)::int AS artist_enrich_attempts,
+    s.link_attempts
 FROM song_metadata s
 LEFT JOIN albums al ON al.id = s.album_id
 LEFT JOIN artists ar ON ar.id = s.artist_id
@@ -77,7 +81,8 @@ LIMIT 1;
 
 -- name: GetArtist :one
 SELECT id, spotify_id, name, genres, popularity, image_url, created_at,
-    ratings_count, avg_rating
+    ratings_count, avg_rating,
+    (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts
 FROM artists
 WHERE id = sqlc.arg(id)::uuid OR spotify_id = sqlc.arg(spotify_id)::text
 LIMIT 1;

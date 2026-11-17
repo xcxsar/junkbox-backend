@@ -141,6 +141,19 @@ func targetArgs(t domain.Target) (sql.NullInt32, *uuid.UUID, *uuid.UUID) {
 	}
 }
 
+// targetFromColumns es la inversa de targetArgs para una fila leída.
+func targetFromColumns(songID sql.NullInt32, albumID, artistID *uuid.UUID) domain.Target {
+	switch {
+	case songID.Valid:
+		return domain.Target{Type: domain.TargetSong, SongID: songID.Int32}
+	case albumID != nil:
+		return domain.Target{Type: domain.TargetAlbum, AlbumID: *albumID}
+	case artistID != nil:
+		return domain.Target{Type: domain.TargetArtist, ArtistID: *artistID}
+	}
+	return domain.Target{}
+}
+
 // targetRefFromColumns es la inversa de targetArgs para una fila leída.
 func targetRefFromColumns(songID sql.NullInt32, albumID, artistID *uuid.UUID) domain.TargetRef {
 	switch {

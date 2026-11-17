@@ -777,7 +777,9 @@ curl -i -X GET "http://localhost:8080/api/v1/music/search?q=Espresso%20Sabrina%2
 ---
 
 #### 12. Detalle de Canción (`GET /api/v1/music/tracks/{id}`)
-Devuelve los metadatos completos de una canción: atributos acústicos y si ya tiene vector de recomendación (`has_embedding`).
+Devuelve los metadatos completos de una canción: atributos acústicos, imágenes y si ya tiene vector de recomendación (`has_embedding`).
+
+`album_image_url` es la carátula del álbum o sencillo y `artist_image_url` la foto del artista. Si faltan, se piden a Spotify antes de responder, igual que en la búsqueda (con el mismo presupuesto, `SEARCH_ENRICH_BUDGET`). Una canción del CSV sin álbum se enlaza en ese momento con su álbum de Spotify, así que también se completan `album_id` y `album_title`. Lo que no alcance a llegar sale en `null` y lo completa el worker de respaldo.
 
 El parámetro `{id}` puede ser el ID de Spotify o el ID entero local. `audio_features` es `null` mientras la canción no tenga ninguno. `ratings` resume las calificaciones de los usuarios: `average` es `null` mientras no haya votos (ver endpoint 15).
 
@@ -796,6 +798,8 @@ curl -i -X GET "http://localhost:8080/api/v1/music/tracks/2qSkXiYOKEzfk3vhRpIQUR
   "track_name": "Espresso",
   "artist_name": "Sabrina Carpenter",
   "album_title": "Short n' Sweet",
+  "album_image_url": "https://i.scdn.co/image/ab67616d0000b273...",
+  "artist_image_url": "https://i.scdn.co/image/ab6761610000e5eb...",
   "year": 2024,
   "genre": null,
   "popularity": null,
@@ -826,7 +830,7 @@ curl -i -X GET "http://localhost:8080/api/v1/music/tracks/2qSkXiYOKEzfk3vhRpIQUR
 ---
 
 #### 13. Detalle de Artista (`GET /api/v1/music/artists/{id}`)
-Obtiene los datos del artista (géneros, popularidad, imagen y `ratings`) por ID de Spotify o UUID local. Los artistas que vienen del CSV no tienen `spotify_id` hasta que una búsqueda en Spotify los "reclama" por nombre. `popularity` es `null` si Spotify no la envía.
+Obtiene los datos del artista (géneros, popularidad, imagen y `ratings`) por ID de Spotify o UUID local. Los artistas que vienen del CSV no tienen `spotify_id` hasta que una búsqueda en Spotify los "reclama" por nombre. `popularity` es `null` si Spotify no la envía. Si al artista le falta la imagen y tiene `spotify_id`, se pide a Spotify antes de responder, igual que en la búsqueda.
 
 ```bash
 curl -i -X GET "http://localhost:8080/api/v1/music/artists/74KM79TiuVKeVCqs8QtB0B" \
@@ -956,7 +960,9 @@ curl -i -X DELETE http://localhost:8080/api/v1/ratings/e5000000-0000-0000-0000-0
 ---
 
 #### 18. Publicar Reseña (`POST /api/v1/reviews`)
-Publica la reseña del usuario sobre una canción, un álbum o un artista. Se puede reseñar sin calificar. El puntaje que acompaña a la reseña (`rating_score`) es el voto actual del autor sobre el mismo objetivo, o `null` si no lo ha calificado. Cada usuario puede publicar una sola reseña por objetivo: una segunda responde `409`, y para cambiarla se usa el endpoint 21.
+Publica la reseña del usuario sobre una canción, un álbum o un artista. Se puede reseñar sin calificar.
+
+`target.summary` trae el resumen del objetivo para pintar la tarjeta sin otra petición: una canción como en la búsqueda (con `album_image_url` y `artist_image_url`), un álbum como en el detalle de álbum (sin `tracks` ni `ratings`) o un artista como en su detalle (sin `ratings`). Las imágenes que faltan se piden a Spotify antes de responder, igual que en el detalle de canción. Si el objetivo ya no existe, `summary` no aparece. El puntaje que acompaña a la reseña (`rating_score`) es el voto actual del autor sobre el mismo objetivo, o `null` si no lo ha calificado. Cada usuario puede publicar una sola reseña por objetivo: una segunda responde `409`, y para cambiarla se usa el endpoint 21.
 
 **Cuerpo de la petición (JSON):**
 - `target_type` (string, obligatorio): `"song"`, `"album"` o `"artist"`.
@@ -980,7 +986,25 @@ curl -i -X POST http://localhost:8080/api/v1/reviews \
 ```json
 {
   "id": "f5000000-0000-0000-0000-000000000001",
-  "target": { "type": "song", "id": "10924" },
+  "target": {
+    "type": "song",
+    "id": "10924",
+    "summary": {
+      "id": 10924,
+      "spotify_id": "1TIHAkrLbRALyt4O4Oh28i",
+      "track_name": "Grain",
+      "artist_name": "Dan Telfer",
+      "album_title": "Tendrils of Ruin",
+      "album_image_url": "https://i.scdn.co/image/ab67616d0000b2736efeb692fd68a9ff61bbdb5b",
+      "artist_image_url": "https://i.scdn.co/image/ab6761610000e5ebb98d66d9dbd2782142357178",
+      "year": 2012,
+      "genre": "comedy",
+      "popularity": 5,
+      "duration_ms": 352307,
+      "has_embedding": true,
+      "pending_embedding": false
+    }
+  },
   "title": "Excelente pieza",
   "content": "Una interpretación magnífica y un ritmo impecable.",
   "rating_score": 4.5,
@@ -1014,10 +1038,28 @@ curl -i -X GET "http://localhost:8080/api/v1/reviews?target_type=song&target_id=
   -H "Authorization: Bearer $ACCESS_TOKEN"
 ```
 
-**Respuesta (`200 OK`):** `count` es el número de reseñas de esta página y `total` el de todas las del objetivo.
+**Respuesta (`200 OK`):** `count` es el número de reseñas de esta página y `total` el de todas las del objetivo. Todas las reseñas son del mismo objetivo: el resumen (`target.summary`) se calcula una vez y aparece en la página y en cada reseña.
 ```json
 {
-  "target": { "type": "song", "id": "10924" },
+  "target": {
+    "type": "song",
+    "id": "10924",
+    "summary": {
+      "id": 10924,
+      "spotify_id": "1TIHAkrLbRALyt4O4Oh28i",
+      "track_name": "Grain",
+      "artist_name": "Dan Telfer",
+      "album_title": "Tendrils of Ruin",
+      "album_image_url": "https://i.scdn.co/image/ab67616d0000b2736efeb692fd68a9ff61bbdb5b",
+      "artist_image_url": "https://i.scdn.co/image/ab6761610000e5ebb98d66d9dbd2782142357178",
+      "year": 2012,
+      "genre": "comedy",
+      "popularity": 5,
+      "duration_ms": 352307,
+      "has_embedding": true,
+      "pending_embedding": false
+    }
+  },
   "page": 1,
   "limit": 10,
   "count": 1,
@@ -1025,7 +1067,7 @@ curl -i -X GET "http://localhost:8080/api/v1/reviews?target_type=song&target_id=
   "reviews": [
     {
       "id": "f5000000-0000-0000-0000-000000000001",
-      "target": { "type": "song", "id": "10924" },
+      "target": { "type": "song", "id": "10924", "summary": { "…": "igual que arriba" } },
       "title": "Excelente pieza",
       "content": "Una interpretación magnífica y un ritmo impecable.",
       "rating_score": 4.5,

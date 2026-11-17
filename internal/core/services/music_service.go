@@ -274,16 +274,55 @@ func (s *MusicService) searchRemote(ctx context.Context, query, searchType strin
 }
 
 // GetTrack devuelve el detalle de una canción por id local (entero) o por
-// su ID de Spotify.
+// su ID de Spotify. Como la búsqueda, antes de responder completa con
+// Spotify la portada (enlazando las canciones del CSV con su álbum) y la
+// foto del artista que falten; si eso falla o no alcanza el presupuesto,
+// responde lo que hay en el catálogo.
 func (s *MusicService) GetTrack(ctx context.Context, id string) (*domain.TrackDetail, error) {
 	arg, err := parseTrackID(id)
 	if err != nil {
 		return nil, err
 	}
+	return s.trackDetail(ctx, arg)
+}
+
+func (s *MusicService) trackDetail(ctx context.Context, arg sqlc.GetTrackParams) (*domain.TrackDetail, error) {
 	r, err := s.catalog.GetTrack(ctx, arg)
 	if err != nil {
 		return nil, notFoundOr(err, "music: obtener canción")
 	}
+	detail := trackDetailFromRow(r)
+
+	got, ok := resolveEnrichment(ctx, s.enrich, trackEnrichmentState{
+		SpotifyID:            r.TrackID.String,
+		AlbumID:              r.AlbumID,
+		LinkAttempts:         r.LinkAttempts,
+		HasArtistImage:       r.ArtistImageUrl.Valid,
+		ArtistSpotifyID:      r.ArtistSpotifyID.String,
+		ArtistEnriched:       r.ArtistEnriched,
+		ArtistEnrichAttempts: r.ArtistEnrichAttempts,
+	}.jobs())
+	if !ok {
+		return detail, nil
+	}
+	// Al enlazarla cambian album_id y artist_id: se relee la fila para
+	// devolverlos actualizados. La imagen de artista recién pedida se
+	// aplica encima por si la fila releída aún no la tiene.
+	if _, linked := got.songs[detail.SpotifyID]; linked {
+		if fresh, err := s.catalog.GetTrack(ctx, sqlc.GetTrackParams{ID: r.ID}); err == nil {
+			detail = trackDetailFromRow(fresh)
+			r = fresh
+		} else {
+			log.Printf("detalle de canción: releer %d tras enlazarla: %v", r.ID, err)
+		}
+	}
+	tracks := []domain.Track{detail.Track}
+	applyTrackEnrichment(tracks, []string{r.ArtistSpotifyID.String}, got)
+	detail.Track = tracks[0]
+	return detail, nil
+}
+
+func trackDetailFromRow(r sqlc.GetTrackRow) *domain.TrackDetail {
 	detail := &domain.TrackDetail{
 		Track: domain.Track{
 			ID:               r.ID,
@@ -322,22 +361,64 @@ func (s *MusicService) GetTrack(ctx context.Context, id string) (*domain.TrackDe
 	if features != (domain.AudioFeatures{}) {
 		detail.AudioFeatures = &features
 	}
-	return detail, nil
+	return detail
 }
 
-// GetArtist devuelve un artista por UUID local o por ID de Spotify.
+// GetArtist devuelve un artista por UUID local o por ID de Spotify. Si le
+// falta la imagen, la pide a Spotify antes de responder, como la búsqueda.
 func (s *MusicService) GetArtist(ctx context.Context, id string) (*domain.Artist, error) {
 	localID, spotifyID, err := parseEntityID(id)
 	if err != nil {
 		return nil, err
 	}
-	r, err := s.catalog.GetArtist(ctx, sqlc.GetArtistParams{ID: localID, SpotifyID: spotifyID})
+	return s.artist(ctx, sqlc.GetArtistParams{ID: localID, SpotifyID: spotifyID})
+}
+
+func (s *MusicService) artist(ctx context.Context, arg sqlc.GetArtistParams) (*domain.Artist, error) {
+	r, err := s.catalog.GetArtist(ctx, arg)
 	if err != nil {
 		return nil, notFoundOr(err, "music: obtener artista")
 	}
 	artist := artistFromRow(r)
 	artist.Ratings = &domain.RatingStats{Count: r.RatingsCount, Average: r.AvgRating}
+	if !r.ImageUrl.Valid && artistEnrichable(r.SpotifyID.String, r.Enriched, r.EnrichAttempts) {
+		job := domain.EnrichmentJob{Kind: domain.EnrichArtist, SpotifyID: r.SpotifyID.String}
+		if got, ok := resolveEnrichment(ctx, s.enrich, []domain.EnrichmentJob{job}); ok {
+			artist.ImageURL = got.artistImages[job.SpotifyID]
+		}
+	}
 	return &artist, nil
+}
+
+// SummarizeTarget devuelve el resumen de un objetivo para las reseñas:
+// *domain.Track, *domain.Album (sin pistas) o *domain.Artist, sin
+// estadísticas de calificación. Completa las imágenes que falten igual que
+// el detalle.
+func (s *MusicService) SummarizeTarget(ctx context.Context, target domain.Target) (any, error) {
+	switch target.Type {
+	case domain.TargetSong:
+		detail, err := s.trackDetail(ctx, sqlc.GetTrackParams{ID: target.SongID})
+		if err != nil {
+			return nil, err
+		}
+		return &detail.Track, nil
+	case domain.TargetAlbum:
+		r, err := s.catalog.GetAlbum(ctx, sqlc.GetAlbumParams{ID: target.AlbumID})
+		if err != nil {
+			return nil, notFoundOr(err, "music: obtener álbum")
+		}
+		album := albumFromRow(r)
+		return &album, nil
+	case domain.TargetArtist:
+		artist, err := s.artist(ctx, sqlc.GetArtistParams{ID: target.ArtistID})
+		if err != nil {
+			return nil, err
+		}
+		artist.Ratings = nil
+		return artist, nil
+	default:
+		return nil, fmt.Errorf("music: tipo de objetivo desconocido %q", target.Type)
+	}
 }
 
 // GetAlbum devuelve un álbum, con sus pistas, por UUID local o por ID de

@@ -46,10 +46,14 @@ func (t Target) Ref() TargetRef {
 }
 
 // TargetRef identifica un objetivo en las respuestas: id entero (canción) o
-// UUID (álbum o artista), siempre el local.
+// UUID (álbum o artista), siempre el local. Summary solo se llena en las
+// reseñas, para que el cliente pinte la tarjeta sin pedir el detalle:
+// *Track, *Album (sin pistas) o *Artist según Type. Es un puntero para que
+// TargetRef siga siendo comparable.
 type TargetRef struct {
-	Type string `json:"type"`
-	ID   string `json:"id"`
+	Type    string `json:"type"`
+	ID      string `json:"id"`
+	Summary any    `json:"summary,omitempty"`
 }
 
 // RatingStats son las estadísticas de calificación de un objetivo del

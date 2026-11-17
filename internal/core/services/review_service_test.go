@@ -30,6 +30,21 @@ func (f *fakeResolver) ResolveTarget(_ context.Context, targetType, _ string) (d
 	return t, nil
 }
 
+// fakeSummarizer devuelve un resumen por tipo de objetivo y cuenta las
+// llamadas.
+type fakeSummarizer struct {
+	err   error
+	calls []domain.Target
+}
+
+func (f *fakeSummarizer) SummarizeTarget(_ context.Context, target domain.Target) (any, error) {
+	f.calls = append(f.calls, target)
+	if f.err != nil {
+		return nil, f.err
+	}
+	return &domain.Track{ID: target.SongID, TrackName: "Yellow"}, nil
+}
+
 // fakeRatings guarda los votos en memoria con la misma unicidad que la BD
 // (usuario + objetivo).
 type fakeRatings struct {
@@ -258,7 +273,7 @@ func TestDeleteRatingAutorizacion(t *testing.T) {
 
 func TestCreateReviewNormaliza(t *testing.T) {
 	store := newFakeReviews()
-	svc := NewReviewService(store, &fakeResolver{target: domain.Target{SongID: 10924}})
+	svc := NewReviewService(store, &fakeResolver{target: domain.Target{SongID: 10924}}, nil)
 
 	review, err := svc.Create(context.Background(), uuid.New(), domain.TargetSong, "10924", ReviewInput{
 		Title:   ptr("   "),
@@ -279,7 +294,7 @@ func TestCreateReviewNormaliza(t *testing.T) {
 }
 
 func TestCreateReviewValidaLongitudes(t *testing.T) {
-	svc := NewReviewService(newFakeReviews(), &fakeResolver{target: domain.Target{SongID: 1}})
+	svc := NewReviewService(newFakeReviews(), &fakeResolver{target: domain.Target{SongID: 1}}, nil)
 	cases := map[string]ReviewInput{
 		"content corto":           {Content: " abcd "},
 		"content largo":           {Content: strings.Repeat("a", MaxReviewContentLen+1)},
@@ -304,7 +319,7 @@ func TestCreateReviewValidaLongitudes(t *testing.T) {
 func TestCreateReviewDuplicada(t *testing.T) {
 	store := newFakeReviews()
 	store.createErr = uniqueViolation{}
-	svc := NewReviewService(store, &fakeResolver{target: domain.Target{SongID: 1}})
+	svc := NewReviewService(store, &fakeResolver{target: domain.Target{SongID: 1}}, nil)
 	_, err := svc.Create(context.Background(), uuid.New(), domain.TargetSong, "1", ReviewInput{Content: "otra reseña"})
 	if !errors.Is(err, domain.ErrReviewAlreadyExists) {
 		t.Fatalf("esperaba ErrReviewAlreadyExists, obtuve %v", err)
@@ -313,7 +328,7 @@ func TestCreateReviewDuplicada(t *testing.T) {
 
 func TestUpdateDeleteReviewAutorizacion(t *testing.T) {
 	store := newFakeReviews()
-	svc := NewReviewService(store, &fakeResolver{target: domain.Target{SongID: 1}})
+	svc := NewReviewService(store, &fakeResolver{target: domain.Target{SongID: 1}}, nil)
 	owner, other := uuid.New(), uuid.New()
 	review, err := svc.Create(context.Background(), owner, domain.TargetSong, "1", ReviewInput{Title: ptr("Título"), Content: "Primera versión"})
 	if err != nil {
@@ -350,7 +365,7 @@ func TestListReviewsPaginacion(t *testing.T) {
 	store := newFakeReviews()
 	store.total = 45
 	albumID := uuid.New()
-	svc := NewReviewService(store, &fakeResolver{target: domain.Target{AlbumID: albumID}})
+	svc := NewReviewService(store, &fakeResolver{target: domain.Target{AlbumID: albumID}}, nil)
 
 	page, err := svc.List(context.Background(), domain.TargetAlbum, albumID.String(), 0, 3)
 	if err != nil {
@@ -398,5 +413,77 @@ func TestResolveTarget(t *testing.T) {
 	}
 	if _, err := svc.ResolveTarget(context.Background(), domain.TargetAlbum, "no-es-id"); !errors.As(err, &validation) {
 		t.Errorf("id inválido: esperaba ValidationError, obtuve %v", err)
+	}
+}
+
+// --- resumen del objetivo ---
+
+func TestReviewTraeElResumenDeSuObjetivo(t *testing.T) {
+	store := newFakeReviews()
+	summaries := &fakeSummarizer{}
+	svc := NewReviewService(store, &fakeResolver{target: domain.Target{SongID: 10924}}, summaries)
+
+	review, err := svc.Create(context.Background(), uuid.New(), domain.TargetSong, "10924", ReviewInput{Content: "Gran producción."})
+	if err != nil {
+		t.Fatal(err)
+	}
+	track, ok := review.Target.Summary.(*domain.Track)
+	if !ok || track.ID != 10924 || track.TrackName != "Yellow" {
+		t.Fatalf("summary = %#v", review.Target.Summary)
+	}
+	if len(summaries.calls) != 1 || summaries.calls[0] != (domain.Target{Type: domain.TargetSong, SongID: 10924}) {
+		t.Fatalf("debía resumir la canción de la reseña: %+v", summaries.calls)
+	}
+}
+
+func TestListReviewsResumeElObjetivoUnaVez(t *testing.T) {
+	store := newFakeReviews()
+	summaries := &fakeSummarizer{}
+	resolver := &fakeResolver{target: domain.Target{SongID: 1}}
+	writer := NewReviewService(store, resolver, nil)
+	for range 3 {
+		if _, err := writer.Create(context.Background(), uuid.New(), domain.TargetSong, "1", ReviewInput{Content: "Muy buena."}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	svc := NewReviewService(store, resolver, summaries)
+
+	page, err := svc.List(context.Background(), domain.TargetSong, "1", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(summaries.calls) != 1 {
+		t.Fatalf("el resumen debía resolverse una sola vez, hubo %d llamadas", len(summaries.calls))
+	}
+	if page.Target.Summary == nil || len(page.Reviews) != 3 {
+		t.Fatalf("página = %+v", page)
+	}
+	for _, r := range page.Reviews {
+		if r.Target.Summary != page.Target.Summary {
+			t.Fatalf("cada reseña debía traer el resumen: %#v", r.Target.Summary)
+		}
+	}
+}
+
+func TestReviewObjetivoInexistenteSaleSinResumen(t *testing.T) {
+	store := newFakeReviews()
+	svc := NewReviewService(store, &fakeResolver{target: domain.Target{SongID: 1}}, &fakeSummarizer{err: domain.ErrNotFound})
+
+	review, err := svc.Create(context.Background(), uuid.New(), domain.TargetSong, "1", ReviewInput{Content: "Muy buena."})
+	if err != nil {
+		t.Fatalf("un objetivo sin resumen no debe fallar: %v", err)
+	}
+	if review.Target.Summary != nil {
+		t.Fatalf("summary = %#v", review.Target.Summary)
+	}
+}
+
+func TestReviewErrorAlResumirSePropaga(t *testing.T) {
+	store := newFakeReviews()
+	id, _ := store.CreateReview(context.Background(), sqlc.CreateReviewParams{UserID: uuid.New(), SongID: sql.NullInt32{Int32: 1, Valid: true}, Content: "Muy buena."})
+	svc := NewReviewService(store, &fakeResolver{}, &fakeSummarizer{err: errors.New("bd caída")})
+
+	if _, err := svc.Get(context.Background(), id); err == nil {
+		t.Fatal("esperaba error")
 	}
 }

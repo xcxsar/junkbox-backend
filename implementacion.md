@@ -1699,6 +1699,10 @@ Las portadas de las canciones del fallback de Spotify ya vienen en `/v1/search`:
 - Las escrituras en la BD posteriores a una respuesta de Spotify usan un contexto propio (5 s) para no perder una llamada ya hecha si el presupuesto vence justo después.
 - Un fallo del enriquecimiento nunca hace fallar la búsqueda.
 
+**Detalle de canción (HOME-02).** `GET /music/tracks/{id}` (`MusicService.GetTrack`) usa la misma ruta síncrona: si a la canción le falta álbum o foto del artista, pide los mismos jobs dentro del presupuesto. Si la canción se enlazó, se **relee la fila** para devolver `album_id`, `artist_id`, `album_title` y `album_image_url` actualizados (`ImportedSong` no trae los IDs locales). Lo hacen también `/home` (§9) mediante el helper compartido `track_enrichment.go`. `ResolveTarget` (calificar o reseñar) usa la misma consulta `GetTrack` pero **no** enriquece: escribir un voto no debe esperar a Spotify. Las reseñas sí completan las imágenes, pero al armar la respuesta (`SummarizeTarget`, §6.4), no al resolver el objetivo. `GET /music/artists/{id}` también pide la imagen del artista si falta (`GetArtist` ahora lee `enriched_at` y `enrich_attempts`).
+
+No hay *backfill* en lote: sin endpoints por lotes, enlazar las 1.16M canciones del CSV costaría una llamada por canción. Se enlazan cuando alguien las ve (búsqueda, `/home` o detalle).
+
 **Cuándo no se vuelve a llamar:**
 
 - un artista con `enriched_at`;
@@ -1731,7 +1735,8 @@ Los cortes por presupuesto y los 429 no consumen intentos.
   - artistas ya enriquecidos o sin intentos;
   - búsqueda de artistas;
   - 404 de una canción;
-  - imágenes del fallback.
+  - imágenes del fallback;
+  - detalle de canción: enlace del CSV con relectura, ya enlazada sin llamadas, sin Spotify, presupuesto vencido, y `ResolveTarget` sin llamadas.
 - `catalog_enrichment_worker_test.go`:
   - solo se consulta lo reservado;
   - encadenamiento;
@@ -2163,7 +2168,7 @@ Además, `GetTrack`, `GetArtist` y `GetAlbum` (`db/queries/catalog.sql`) devuelv
 
 ### 6.4 Lógica de Negocio y Casos de Uso (`RatingService` y `ReviewService`)
 
-Ubicación: `internal/core/services/rating_service.go` y `review_service.go`. Ambos dependen de los puertos de `internal/core/ports/review_ports.go`: `RatingStore`, `ReviewStore` (implementados por `*sqlc.Queries`) y `TargetResolver`.
+Ubicación: `internal/core/services/rating_service.go` y `review_service.go`. Ambos dependen de los puertos de `internal/core/ports/review_ports.go`: `RatingStore`, `ReviewStore` (implementados por `*sqlc.Queries`), `TargetResolver` y, solo las reseñas, `TargetSummarizer` (los dos últimos los implementa `MusicService`).
 
 #### Resolución del objetivo (`MusicService.ResolveTarget`)
 `target_id` admite los mismos formatos que el detalle del catálogo: un entero o un ID de Spotify para canciones, y un UUID o un ID de Spotify para álbumes y artistas. `MusicService.ResolveTarget` reutiliza ese parseo y las queries `GetTrack`, `GetAlbum` y `GetArtist` para obtener el id local. Solo consulta el catálogo local: un ID de Spotify nunca importado devuelve `ErrNotFound` (404). Un `target_type` desconocido devuelve `400`.
@@ -2178,6 +2183,7 @@ Ubicación: `internal/core/services/rating_service.go` y `review_service.go`. Am
 - **`Create`:** resuelve el objetivo e inserta. El `23505` del índice único se traduce a `ErrReviewAlreadyExists` (409).
 - **`List`:** `limit` de 1 a 50 (20 por defecto) y `page` desde 1. Devuelve `count` (reseñas de la página) y `total` (todas las del objetivo), de la más reciente a la más antigua.
 - **`Update` / `Delete`:** primero leen la reseña para distinguir `404` (no existe) de `403` (es de otro usuario). `Update` reemplaza título y contenido (semántica `PUT`).
+- **Resumen del objetivo (HOME-02):** cada reseña devuelve `target.summary` para que `ReviewCard` no pida el detalle. `MusicService.SummarizeTarget` devuelve `*domain.Track` (con el mismo enriquecimiento que `GET /music/tracks/{id}`), `*domain.Album` (sin pistas ni estadísticas, sin la consulta de pistas) o `*domain.Artist` (sin estadísticas, con la imagen completada si falta). `Get` (que también usan `Create` y `Update`) lo resuelve a partir de las columnas del objetivo; `List` lo resuelve **una vez** por página, porque todas las reseñas son del mismo objetivo, y lo repite en `ReviewPage.target` y en cada reseña. Un objetivo inexistente (`ErrNotFound`) deja `summary` fuera; otro error se propaga (500). `summary` es un puntero dentro de `TargetRef` (`any`, `omitempty`), así que las calificaciones, que también usan `TargetRef`, no cambian.
 
 ---
 

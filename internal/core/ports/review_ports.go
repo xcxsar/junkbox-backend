@@ -15,6 +15,14 @@ type TargetResolver interface {
 	ResolveTarget(ctx context.Context, targetType, id string) (domain.Target, error)
 }
 
+// TargetSummarizer devuelve el resumen de un objetivo para mostrarlo junto
+// a sus reseñas: *domain.Track, *domain.Album o *domain.Artist. Si el
+// objetivo no existe devuelve domain.ErrNotFound. Lo implementa
+// MusicService.
+type TargetSummarizer interface {
+	SummarizeTarget(ctx context.Context, target domain.Target) (any, error)
+}
+
 // RatingStore son las queries de calificaciones.
 type RatingStore interface {
 	UpsertSongRating(ctx context.Context, arg sqlc.UpsertSongRatingParams) (sqlc.UpsertSongRatingRow, error)

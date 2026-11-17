@@ -214,3 +214,109 @@ Cada elemento lleva `type` y, al mismo nivel, los mismos campos que una canción
 
 - `go test ./...`: `recommendation_service_test.go` (semilla con y sin género, reintento sin género, populares, error de BD, `limit`, imágenes) y `handlers_home_test.go` (401, 400 y forma del JSON).
 - Prueba manual contra el servidor local: un usuario que calificó una canción `emo` recibió 8 canciones `emo` con portada y foto (≈0,95 s la primera vez por las llamadas a Spotify, ≈45 ms después). Un usuario sin actividad recibió populares. Con una canción sin género como semilla se recomendaron canciones de varios géneros. La calificación de prueba se borró.
+
+---
+
+### HOME-02 · Carátula en el resumen de canción
+
+- **Estado:** Resuelta · **Fecha:** 2026-11-16
+- **Responsable:** Backend
+
+#### Qué se pidió
+
+`MusicCard` y `ReviewCard` muestran carátula, pero se reportó que `TrackSummary`/`TrackDetail` no traían imagen y que las canciones del CSV no tenían álbum de Spotify vinculado (las 8 de la plantilla tenían `album_id: null`, comprobado 2026-11-06). Se pidió añadir `image_url` (la carátula del álbum o sencillo) a `Track` y `TrackDetail`, también en `/music/search?type=track`, y enlazar las canciones del dataset con su álbum.
+
+#### Decisión
+
+La mayor parte ya estaba resuelta desde el 2026-11-12 (posterior a la comprobación del 2026-11-06):
+
+- `Track` trae **`album_image_url`** (carátula) y `artist_image_url` (foto del artista) en `/music/search?type=track`, en las pistas de `/music/albums/{id}` y en `/home` (HOME-01).
+- La búsqueda y `/home` enlazan en el momento las canciones del CSV con su álbum de Spotify (`album_id` y `album_title` quedan guardados) y piden las imágenes que faltan antes de responder.
+
+Lo que faltaba era **`GET /music/tracks/{id}`**: solo leía la base de datos, así que una canción del CSV que nadie había buscado salía sin carátula ni álbum. Ahora el detalle completa la carátula y la foto igual que la búsqueda, y devuelve `album_id`, `album_title` y `album_image_url` ya enlazados.
+
+Además, para que `ReviewCard` no tenga que pedir el detalle de cada canción, **las reseñas traen el resumen de su objetivo** en `target.summary`:
+
+- En `POST /reviews`, `GET /reviews`, `GET /reviews/{id}` y `PUT /reviews/{id}`, en cada reseña. En `GET /reviews` también en `target` de la página; como todas las reseñas de la página son del mismo objetivo, se calcula una sola vez.
+- Para los tres tipos de objetivo, con los mismos objetos que ya conoce el frontend: canción → `TrackSummary` (con `album_image_url` y `artist_image_url`); álbum → `AlbumSummary` sin `tracks` ni `ratings`; artista → `Artist` sin `ratings`.
+- Las imágenes que faltan se completan con Spotify igual que en el detalle. `GET /music/artists/{id}` también completa ahora la foto del artista.
+- Es aditivo: `target.type` y `target.id` no cambian, y las calificaciones no traen `summary`.
+
+Otras decisiones:
+
+- **Se mantiene el nombre `album_image_url`** y no se agrega `image_url`: sería un campo duplicado, y en una canción `image_url` es ambiguo junto a `artist_image_url`.
+- **No hay enlace en lote** de las 1.16M canciones: Spotify (Development Mode) ya no tiene endpoints por lotes, así que serían 1.16M llamadas. Cada canción se enlaza la primera vez que se muestra (búsqueda, `/home` o detalle) y queda guardada.
+- Calificar o reseñar no llama a Spotify; solo leer el detalle.
+
+#### Contrato de la API
+
+Sin campos nuevos. `GET /api/v1/music/tracks/{id}`:
+
+```json
+{
+  "id": 1,
+  "track_name": "I Won't Give Up",
+  "artist_name": "Jason Mraz",
+  "album_id": "1847347e-5054-48c1-ba3b-b83eb60becb6",
+  "album_title": "Love Is a Four Letter Word (Deluxe Edition)",
+  "album_image_url": "https://i.scdn.co/image/ab67616d0000b27346e379c721504777a62bd9b8",
+  "artist_image_url": "https://i.scdn.co/image/ab6761610000e5ebead36c5fd05aae7d7f3463c6",
+  "…": "resto de campos sin cambios"
+}
+```
+
+| Caso | `album_image_url` |
+| --- | --- |
+| Canción ya enlazada | URL de la carátula (sin llamar a Spotify) |
+| Canción del CSV no enlazada, Spotify responde dentro del presupuesto (2 s) | URL de la carátula; `album_id` y `album_title` también llegan |
+| Spotify no responde a tiempo | `null` en esta respuesta; el worker la enlaza y la siguiente lectura ya la trae |
+| La canción no existe en Spotify o no tiene álbum con imagen | `null` |
+
+Reseñas (`POST`/`GET`/`PUT /api/v1/reviews…`):
+
+```json
+{
+  "id": "a65bd2e0-f5ce-4e39-8bf4-66b38bdb0bfa",
+  "target": {
+    "type": "song",
+    "id": "3",
+    "summary": {
+      "id": 3,
+      "spotify_id": "7BRCa8MPiyuvr2VU3O9W0F",
+      "track_name": "Do Not Let Me Go",
+      "artist_name": "Joshua Hyslop",
+      "album_title": "Where The Mountain Meets The Valley",
+      "album_image_url": "https://i.scdn.co/image/ab67616d0000b273e6655a69a59d319e2d3b00b4",
+      "artist_image_url": "https://i.scdn.co/image/ab6761610000e5ebfc8d3ec0f5fb1e2e6cda01aa",
+      "year": 2012,
+      "genre": "acoustic",
+      "…": "resto de campos de TrackSummary"
+    }
+  },
+  "content": "…",
+  "…": "resto de campos de la reseña sin cambios"
+}
+```
+
+| `target.type` | `target.summary` |
+| --- | --- |
+| `song` | `TrackSummary` (como en `/music/search?type=track`) |
+| `album` | Álbum como en `/music/albums/{id}`, sin `tracks` ni `ratings` (`image_url` es la carátula) |
+| `artist` | Artista como en `/music/artists/{id}`, sin `ratings` |
+| objetivo borrado | `summary` ausente |
+
+#### Qué tiene que hacer el frontend
+
+1. Leer la carátula de `album_image_url` (no `image_url`) en `Track` y `TrackDetail`, incluidos los resultados del Buscador.
+2. Quitar los álbumes fijados a mano en la plantilla de Inicio y sus llamadas a `/music/albums/{id}` o `/music/search?type=album`: Inicio ya usa `GET /home` (HOME-01), que trae la carátula.
+3. Mantener el recuadro neutro cuando `album_image_url` sea `null`.
+4. En `ReviewCard`, leer título, artista y carátula de `review.target.summary` y quitar la petición a `/music/tracks/{id}` (o a álbum/artista) por cada reseña.
+
+#### Pendiente / fuera de alcance
+
+- Enlace en lote de todo el dataset (ver arriba).
+
+#### Verificación
+
+- `go test ./...`: casos nuevos en `music_service_test.go` (`TestGetTrackEnlazaCancionDelCSVConSuAlbum`, `TestGetTrackYaEnlazadaNoConsultaSpotify`, `TestGetTrackSinSpotifyRespondeLoDelCatalogo`, `TestGetTrackRespetaElPresupuestoYDelegaAlWorker`, `TestResolveTargetNoConsultaSpotify`, `TestSummarizeTarget*`, `TestGetArtistYaEnriquecidoNoConsultaSpotify`) y en `review_service_test.go` (`TestReviewTraeElResumenDeSuObjetivo`, `TestListReviewsResumeElObjetivoUnaVez`, `TestReviewObjetivoInexistenteSaleSinResumen`, `TestReviewErrorAlResumirSePropaga`).
+- Prueba manual contra el servidor local: `GET /music/tracks/1` (canción del CSV sin álbum) respondió con carátula, `album_id` y `album_title` en ≈0,8 s; la segunda lectura, en ≈40 ms sin llamar a Spotify. Calificar la canción `3` (sin álbum) no la enlazó. Reseñar después esa canción, un álbum y un artista sin foto devolvió los tres resúmenes con imagen (la canción quedó enlazada y la foto del artista guardada); `GET /reviews` de la canción respondió en ≈35 ms con el resumen en la página y en la reseña. Las respuestas de calificaciones no cambiaron. Las calificaciones y reseñas de prueba se borraron.

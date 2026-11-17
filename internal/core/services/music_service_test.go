@@ -17,10 +17,15 @@ import (
 // --- fakes ---
 
 type fakeCatalog struct {
-	tracks      []sqlc.SearchTracksTrigramRow
-	artists     []sqlc.SearchArtistsTrigramRow
-	albums      []sqlc.SearchAlbumsTrigramRow
-	track       *sqlc.GetTrackRow
+	tracks  []sqlc.SearchTracksTrigramRow
+	artists []sqlc.SearchArtistsTrigramRow
+	albums  []sqlc.SearchAlbumsTrigramRow
+	track   *sqlc.GetTrackRow
+	// relinked es lo que devuelve GetTrack desde la segunda lectura (la
+	// fila ya enlazada con su álbum). nil: siempre devuelve track.
+	relinked    *sqlc.GetTrackRow
+	trackReads  int
+	artist      *sqlc.GetArtistRow
 	album       *sqlc.GetAlbumRow
 	albumTracks []sqlc.ListTracksByAlbumRow
 	searchErr   error
@@ -43,6 +48,10 @@ func (f *fakeCatalog) SearchAlbumsTrigram(_ context.Context, _ sqlc.SearchAlbums
 
 func (f *fakeCatalog) GetTrack(_ context.Context, arg sqlc.GetTrackParams) (sqlc.GetTrackRow, error) {
 	f.lastTrackArg = arg
+	f.trackReads++
+	if f.relinked != nil && f.trackReads > 1 {
+		return *f.relinked, nil
+	}
 	if f.track == nil {
 		return sqlc.GetTrackRow{}, sql.ErrNoRows
 	}
@@ -51,7 +60,10 @@ func (f *fakeCatalog) GetTrack(_ context.Context, arg sqlc.GetTrackParams) (sqlc
 
 func (f *fakeCatalog) GetArtist(_ context.Context, arg sqlc.GetArtistParams) (sqlc.GetArtistRow, error) {
 	f.lastArtistArg = arg
-	return sqlc.GetArtistRow{}, sql.ErrNoRows
+	if f.artist == nil {
+		return sqlc.GetArtistRow{}, sql.ErrNoRows
+	}
+	return *f.artist, nil
 }
 
 func (f *fakeCatalog) GetAlbum(_ context.Context, _ sqlc.GetAlbumParams) (sqlc.GetAlbumRow, error) {
@@ -636,5 +648,211 @@ func TestGetAlbumIncluyePistas(t *testing.T) {
 	}
 	if len(got.Tracks) != 2 || got.Tracks[1].TrackName != "Espresso" || *got.Tracks[1].AlbumTitle != "Short n' Sweet" {
 		t.Fatalf("pistas inesperadas: %+v", got.Tracks)
+	}
+}
+
+// --- detalle con carátula (HOME-02) ---
+
+// csvTrackRow es una canción del CSV sin álbum de Spotify vinculado.
+func csvTrackRow() *sqlc.GetTrackRow {
+	return &sqlc.GetTrackRow{
+		ID:        7,
+		TrackID:   sql.NullString{String: trackA, Valid: true},
+		TrackName: sql.NullString{String: "Grain", Valid: true},
+	}
+}
+
+func TestGetTrackEnlazaCancionDelCSVConSuAlbum(t *testing.T) {
+	f := newMusicFixture(true)
+	f.catalog.track = csvTrackRow()
+	albumID, artistID := uuid.New(), uuid.New()
+	linked := *csvTrackRow()
+	linked.AlbumID = &albumID
+	linked.ArtistID = &artistID
+	linked.AlbumTitle = sql.NullString{String: "Grain", Valid: true}
+	linked.AlbumImageUrl = sql.NullString{String: "cover.jpg", Valid: true}
+	linked.ArtistSpotifyID = sql.NullString{String: artistB, Valid: true}
+	f.catalog.relinked = &linked
+	f.metadata.tracks[trackA] = domain.ImportedTrack{
+		SpotifyID: trackA, Name: "Grain",
+		Artist: domain.ImportedArtist{SpotifyID: artistB, Name: "Dan Telfer"},
+		Album:  domain.ImportedAlbum{Title: "Grain", ImageURL: strp("cover.jpg")},
+	}
+	f.metadata.artists[artistB] = domain.ImportedArtist{SpotifyID: artistB, ImageURL: strp("artist.jpg")}
+
+	got, err := f.svc.GetTrack(context.Background(), "7")
+	if err != nil {
+		t.Fatalf("GetTrack: %v", err)
+	}
+	if got.AlbumImageURL == nil || *got.AlbumImageURL != "cover.jpg" || got.AlbumTitle == nil || *got.AlbumTitle != "Grain" {
+		t.Fatalf("debía traer la portada del álbum enlazado: %+v", got.Track)
+	}
+	if got.AlbumID == nil || *got.AlbumID != albumID || got.ArtistID == nil || *got.ArtistID != artistID {
+		t.Fatalf("debía devolver album_id y artist_id de la fila releída: album=%v artist=%v", got.AlbumID, got.ArtistID)
+	}
+	if got.ArtistImageURL == nil || *got.ArtistImageURL != "artist.jpg" {
+		t.Fatalf("debía encadenar la imagen del artista: %v", got.ArtistImageURL)
+	}
+	if a, tc := f.metadata.calls(); a != 1 || tc != 1 {
+		t.Fatalf("llamadas = artistas %d, canciones %d", a, tc)
+	}
+}
+
+func TestGetTrackYaEnlazadaNoConsultaSpotify(t *testing.T) {
+	f := newMusicFixture(true)
+	albumID := uuid.New()
+	row := csvTrackRow()
+	row.AlbumID = &albumID
+	row.AlbumImageUrl = sql.NullString{String: "cover.jpg", Valid: true}
+	row.ArtistImageUrl = sql.NullString{String: "artist.jpg", Valid: true}
+	row.ArtistSpotifyID = sql.NullString{String: artistA, Valid: true}
+	f.catalog.track = row
+
+	got, err := f.svc.GetTrack(context.Background(), "7")
+	if err != nil {
+		t.Fatalf("GetTrack: %v", err)
+	}
+	if a, tc := f.metadata.calls(); a != 0 || tc != 0 || f.catalog.trackReads != 1 {
+		t.Fatalf("no debía consultar Spotify ni releer: artistas %d, canciones %d, lecturas %d", a, tc, f.catalog.trackReads)
+	}
+	if *got.AlbumImageURL != "cover.jpg" || *got.ArtistImageURL != "artist.jpg" {
+		t.Fatalf("imágenes inesperadas: %+v", got.Track)
+	}
+}
+
+func TestGetTrackSinSpotifyRespondeLoDelCatalogo(t *testing.T) {
+	f := newMusicFixture(false)
+	f.catalog.track = csvTrackRow()
+
+	got, err := f.svc.GetTrack(context.Background(), "7")
+	if err != nil {
+		t.Fatalf("GetTrack: %v", err)
+	}
+	if got.AlbumImageURL != nil || got.AlbumID != nil {
+		t.Fatalf("sin Spotify no hay portada: %+v", got)
+	}
+}
+
+func TestGetTrackRespetaElPresupuestoYDelegaAlWorker(t *testing.T) {
+	f := newMusicFixture(true)
+	f.build(true, 50*time.Millisecond, 0)
+	f.catalog.track = csvTrackRow()
+	f.metadata.delay = time.Second
+
+	start := time.Now()
+	got, err := f.svc.GetTrack(context.Background(), "7")
+	if err != nil {
+		t.Fatalf("GetTrack: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("el detalle tardó %s; el presupuesto es 50ms", elapsed)
+	}
+	if got.AlbumImageURL != nil {
+		t.Fatalf("no debía alcanzar a traer la portada: %v", *got.AlbumImageURL)
+	}
+	want := domain.EnrichmentJob{Kind: domain.EnrichTrack, SpotifyID: trackA}
+	if len(f.fallback.jobs) != 1 || f.fallback.jobs[0] != want {
+		t.Fatalf("debía delegar al worker: %+v", f.fallback.jobs)
+	}
+}
+
+func TestResolveTargetNoConsultaSpotify(t *testing.T) {
+	f := newMusicFixture(true)
+	f.catalog.track = csvTrackRow()
+
+	if _, err := f.svc.ResolveTarget(context.Background(), domain.TargetSong, "7"); err != nil {
+		t.Fatalf("ResolveTarget: %v", err)
+	}
+	if a, tc := f.metadata.calls(); a != 0 || tc != 0 {
+		t.Fatalf("calificar no debe llamar a Spotify: artistas %d, canciones %d", a, tc)
+	}
+}
+
+// --- resumen del objetivo de una reseña ---
+
+func TestSummarizeTargetCancionCompletaCaratula(t *testing.T) {
+	f := newMusicFixture(true)
+	f.catalog.track = csvTrackRow()
+	f.metadata.tracks[trackA] = domain.ImportedTrack{
+		SpotifyID: trackA, Name: "Grain",
+		Artist: domain.ImportedArtist{SpotifyID: artistB, Name: "Dan Telfer"},
+		Album:  domain.ImportedAlbum{Title: "Grain", ImageURL: strp("cover.jpg")},
+	}
+
+	got, err := f.svc.SummarizeTarget(context.Background(), domain.Target{Type: domain.TargetSong, SongID: 7})
+	if err != nil {
+		t.Fatalf("SummarizeTarget: %v", err)
+	}
+	track, ok := got.(*domain.Track)
+	if !ok {
+		t.Fatalf("esperaba *domain.Track, obtuve %T", got)
+	}
+	if track.ID != 7 || track.AlbumImageURL == nil || *track.AlbumImageURL != "cover.jpg" {
+		t.Fatalf("resumen inesperado: %+v", track)
+	}
+	if f.catalog.lastTrackArg != (sqlc.GetTrackParams{ID: 7}) {
+		t.Fatalf("debía buscar por id local: %+v", f.catalog.lastTrackArg)
+	}
+}
+
+func TestSummarizeTargetAlbumSinPistasNiEstadisticas(t *testing.T) {
+	f := newMusicFixture(true)
+	albumID := uuid.New()
+	f.catalog.album = &sqlc.GetAlbumRow{ID: albumID, Title: "Short n' Sweet", ArtistName: "Sabrina Carpenter",
+		ImageUrl: sql.NullString{String: "cover.jpg", Valid: true}, RatingsCount: 3}
+	f.catalog.albumTracks = []sqlc.ListTracksByAlbumRow{{ID: 1}}
+
+	got, err := f.svc.SummarizeTarget(context.Background(), domain.Target{Type: domain.TargetAlbum, AlbumID: albumID})
+	if err != nil {
+		t.Fatalf("SummarizeTarget: %v", err)
+	}
+	album, ok := got.(*domain.Album)
+	if !ok {
+		t.Fatalf("esperaba *domain.Album, obtuve %T", got)
+	}
+	if album.ID != albumID || *album.ImageURL != "cover.jpg" || album.Tracks != nil || album.Ratings != nil {
+		t.Fatalf("resumen inesperado: %+v", album)
+	}
+}
+
+func TestSummarizeTargetArtistaCompletaImagen(t *testing.T) {
+	f := newMusicFixture(true)
+	artistID := uuid.New()
+	f.catalog.artist = &sqlc.GetArtistRow{ID: artistID, Name: "Coldplay", SpotifyID: sql.NullString{String: artistA, Valid: true}}
+	f.metadata.artists[artistA] = domain.ImportedArtist{SpotifyID: artistA, ImageURL: strp("artist.jpg")}
+
+	got, err := f.svc.SummarizeTarget(context.Background(), domain.Target{Type: domain.TargetArtist, ArtistID: artistID})
+	if err != nil {
+		t.Fatalf("SummarizeTarget: %v", err)
+	}
+	artist, ok := got.(*domain.Artist)
+	if !ok {
+		t.Fatalf("esperaba *domain.Artist, obtuve %T", got)
+	}
+	if artist.ImageURL == nil || *artist.ImageURL != "artist.jpg" || artist.Ratings != nil {
+		t.Fatalf("resumen inesperado: %+v", artist)
+	}
+	if f.catalog.lastArtistArg != (sqlc.GetArtistParams{ID: artistID}) {
+		t.Fatalf("arg = %+v", f.catalog.lastArtistArg)
+	}
+}
+
+func TestGetArtistYaEnriquecidoNoConsultaSpotify(t *testing.T) {
+	f := newMusicFixture(true)
+	f.catalog.artist = &sqlc.GetArtistRow{ID: uuid.New(), Name: "Sin foto", SpotifyID: sql.NullString{String: artistA, Valid: true}, Enriched: true}
+
+	got, err := f.svc.GetArtist(context.Background(), artistA)
+	if err != nil {
+		t.Fatalf("GetArtist: %v", err)
+	}
+	if a, _ := f.metadata.calls(); a != 0 || got.ImageURL != nil || got.Ratings == nil {
+		t.Fatalf("no debía consultar Spotify (llamadas %d) y debía conservar ratings: %+v", a, got)
+	}
+}
+
+func TestSummarizeTargetNoEncontrado(t *testing.T) {
+	f := newMusicFixture(false)
+	if _, err := f.svc.SummarizeTarget(context.Background(), domain.Target{Type: domain.TargetSong, SongID: 99}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("err = %v, se esperaba ErrNotFound", err)
 	}
 }

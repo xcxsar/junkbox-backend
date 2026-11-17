@@ -255,7 +255,8 @@ func (q *Queries) GetAlbum(ctx context.Context, arg GetAlbumParams) (GetAlbumRow
 
 const getArtist = `-- name: GetArtist :one
 SELECT id, spotify_id, name, genres, popularity, image_url, created_at,
-    ratings_count, avg_rating
+    ratings_count, avg_rating,
+    (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts
 FROM artists
 WHERE id = $1::uuid OR spotify_id = $2::text
 LIMIT 1
@@ -267,15 +268,17 @@ type GetArtistParams struct {
 }
 
 type GetArtistRow struct {
-	ID           uuid.UUID      `json:"id"`
-	SpotifyID    sql.NullString `json:"spotify_id"`
-	Name         string         `json:"name"`
-	Genres       []string       `json:"genres"`
-	Popularity   sql.NullInt32  `json:"popularity"`
-	ImageUrl     sql.NullString `json:"image_url"`
-	CreatedAt    time.Time      `json:"created_at"`
-	RatingsCount int32          `json:"ratings_count"`
-	AvgRating    *float64       `json:"avg_rating"`
+	ID             uuid.UUID      `json:"id"`
+	SpotifyID      sql.NullString `json:"spotify_id"`
+	Name           string         `json:"name"`
+	Genres         []string       `json:"genres"`
+	Popularity     sql.NullInt32  `json:"popularity"`
+	ImageUrl       sql.NullString `json:"image_url"`
+	CreatedAt      time.Time      `json:"created_at"`
+	RatingsCount   int32          `json:"ratings_count"`
+	AvgRating      *float64       `json:"avg_rating"`
+	Enriched       bool           `json:"enriched"`
+	EnrichAttempts int32          `json:"enrich_attempts"`
 }
 
 func (q *Queries) GetArtist(ctx context.Context, arg GetArtistParams) (GetArtistRow, error) {
@@ -291,6 +294,8 @@ func (q *Queries) GetArtist(ctx context.Context, arg GetArtistParams) (GetArtist
 		&i.CreatedAt,
 		&i.RatingsCount,
 		&i.AvgRating,
+		&i.Enriched,
+		&i.EnrichAttempts,
 	)
 	return i, err
 }
@@ -368,7 +373,11 @@ SELECT
     al.title AS album_title,
     al.image_url AS album_image_url,
     ar.image_url AS artist_image_url,
-    s.ratings_count, s.avg_rating
+    s.ratings_count, s.avg_rating,
+    ar.spotify_id AS artist_spotify_id,
+    (ar.enriched_at IS NOT NULL)::bool AS artist_enriched,
+    coalesce(ar.enrich_attempts, 0)::int AS artist_enrich_attempts,
+    s.link_attempts
 FROM song_metadata s
 LEFT JOIN albums al ON al.id = s.album_id
 LEFT JOIN artists ar ON ar.id = s.artist_id
@@ -382,36 +391,40 @@ type GetTrackParams struct {
 }
 
 type GetTrackRow struct {
-	ID               int32           `json:"id"`
-	TrackID          sql.NullString  `json:"track_id"`
-	TrackName        sql.NullString  `json:"track_name"`
-	ArtistName       sql.NullString  `json:"artist_name"`
-	ArtistID         *uuid.UUID      `json:"artist_id"`
-	AlbumID          *uuid.UUID      `json:"album_id"`
-	Isrc             sql.NullString  `json:"isrc"`
-	Year             sql.NullInt32   `json:"year"`
-	Genre            sql.NullString  `json:"genre"`
-	Popularity       sql.NullInt32   `json:"popularity"`
-	DurationMs       sql.NullInt32   `json:"duration_ms"`
-	Danceability     sql.NullFloat64 `json:"danceability"`
-	Energy           sql.NullFloat64 `json:"energy"`
-	Key              sql.NullInt32   `json:"key"`
-	Loudness         sql.NullFloat64 `json:"loudness"`
-	Mode             sql.NullInt32   `json:"mode"`
-	Speechiness      sql.NullFloat64 `json:"speechiness"`
-	Acousticness     sql.NullFloat64 `json:"acousticness"`
-	Instrumentalness sql.NullFloat64 `json:"instrumentalness"`
-	Liveness         sql.NullFloat64 `json:"liveness"`
-	Valence          sql.NullFloat64 `json:"valence"`
-	Tempo            sql.NullFloat64 `json:"tempo"`
-	TimeSignature    sql.NullInt32   `json:"time_signature"`
-	PendingEmbedding bool            `json:"pending_embedding"`
-	HasEmbedding     bool            `json:"has_embedding"`
-	AlbumTitle       sql.NullString  `json:"album_title"`
-	AlbumImageUrl    sql.NullString  `json:"album_image_url"`
-	ArtistImageUrl   sql.NullString  `json:"artist_image_url"`
-	RatingsCount     int32           `json:"ratings_count"`
-	AvgRating        *float64        `json:"avg_rating"`
+	ID                   int32           `json:"id"`
+	TrackID              sql.NullString  `json:"track_id"`
+	TrackName            sql.NullString  `json:"track_name"`
+	ArtistName           sql.NullString  `json:"artist_name"`
+	ArtistID             *uuid.UUID      `json:"artist_id"`
+	AlbumID              *uuid.UUID      `json:"album_id"`
+	Isrc                 sql.NullString  `json:"isrc"`
+	Year                 sql.NullInt32   `json:"year"`
+	Genre                sql.NullString  `json:"genre"`
+	Popularity           sql.NullInt32   `json:"popularity"`
+	DurationMs           sql.NullInt32   `json:"duration_ms"`
+	Danceability         sql.NullFloat64 `json:"danceability"`
+	Energy               sql.NullFloat64 `json:"energy"`
+	Key                  sql.NullInt32   `json:"key"`
+	Loudness             sql.NullFloat64 `json:"loudness"`
+	Mode                 sql.NullInt32   `json:"mode"`
+	Speechiness          sql.NullFloat64 `json:"speechiness"`
+	Acousticness         sql.NullFloat64 `json:"acousticness"`
+	Instrumentalness     sql.NullFloat64 `json:"instrumentalness"`
+	Liveness             sql.NullFloat64 `json:"liveness"`
+	Valence              sql.NullFloat64 `json:"valence"`
+	Tempo                sql.NullFloat64 `json:"tempo"`
+	TimeSignature        sql.NullInt32   `json:"time_signature"`
+	PendingEmbedding     bool            `json:"pending_embedding"`
+	HasEmbedding         bool            `json:"has_embedding"`
+	AlbumTitle           sql.NullString  `json:"album_title"`
+	AlbumImageUrl        sql.NullString  `json:"album_image_url"`
+	ArtistImageUrl       sql.NullString  `json:"artist_image_url"`
+	RatingsCount         int32           `json:"ratings_count"`
+	AvgRating            *float64        `json:"avg_rating"`
+	ArtistSpotifyID      sql.NullString  `json:"artist_spotify_id"`
+	ArtistEnriched       bool            `json:"artist_enriched"`
+	ArtistEnrichAttempts int32           `json:"artist_enrich_attempts"`
+	LinkAttempts         int32           `json:"link_attempts"`
 }
 
 // GetTrack acepta el id local o el track_id de Spotify; el otro se pasa
@@ -450,6 +463,10 @@ func (q *Queries) GetTrack(ctx context.Context, arg GetTrackParams) (GetTrackRow
 		&i.ArtistImageUrl,
 		&i.RatingsCount,
 		&i.AvgRating,
+		&i.ArtistSpotifyID,
+		&i.ArtistEnriched,
+		&i.ArtistEnrichAttempts,
+		&i.LinkAttempts,
 	)
 	return i, err
 }
