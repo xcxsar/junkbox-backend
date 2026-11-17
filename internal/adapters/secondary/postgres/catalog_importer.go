@@ -66,6 +66,7 @@ func (c *CatalogImporter) ImportTracks(ctx context.Context, tracks []domain.Impo
 					DurationMs:       int32Ptr(row.DurationMs),
 					HasEmbedding:     row.HasEmbedding,
 					PendingEmbedding: row.PendingEmbedding,
+					Ratings:          &domain.RatingStats{Count: row.RatingsCount, Average: row.AvgRating},
 				},
 				ISRC:                 stringPtr(row.Isrc),
 				EmbeddingAttempts:    row.EmbeddingAttempts,
@@ -108,6 +109,7 @@ func (c *CatalogImporter) ImportArtists(ctx context.Context, artists []domain.Im
 				Popularity: int32Ptr(row.Popularity),
 				ImageURL:   stringPtr(row.ImageUrl),
 				CreatedAt:  row.CreatedAt,
+				Ratings:    &domain.RatingStats{Count: row.RatingsCount, Average: row.AvgRating},
 			})
 		}
 		return nil
@@ -143,6 +145,7 @@ func (c *CatalogImporter) ImportAlbums(ctx context.Context, albums []domain.Impo
 				ImageURL:    stringPtr(row.ImageUrl),
 				TotalTracks: row.TotalTracks,
 				CreatedAt:   row.CreatedAt,
+				Ratings:     &domain.RatingStats{Count: row.RatingsCount, Average: row.AvgRating},
 			})
 		}
 		return nil

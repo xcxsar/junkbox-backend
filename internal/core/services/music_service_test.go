@@ -936,8 +936,8 @@ func TestSummarizeTargetCancionCompletaCaratula(t *testing.T) {
 	if !ok {
 		t.Fatalf("esperaba *domain.Track, obtuve %T", got)
 	}
-	if track.ID != 7 || track.AlbumImageURL == nil || *track.AlbumImageURL != "cover.jpg" {
-		t.Fatalf("resumen inesperado: %+v", track)
+	if track.ID != 7 || track.AlbumImageURL == nil || *track.AlbumImageURL != "cover.jpg" || track.Ratings != nil {
+		t.Fatalf("resumen inesperado (sin ratings): %+v", track)
 	}
 	if f.catalog.lastTrackArg != (sqlc.GetTrackParams{ID: 7}) {
 		t.Fatalf("debía buscar por id local: %+v", f.catalog.lastTrackArg)
@@ -1004,4 +1004,87 @@ func TestSummarizeTargetNoEncontrado(t *testing.T) {
 	if _, err := f.svc.SummarizeTarget(context.Background(), domain.Target{Type: domain.TargetSong, SongID: 99}); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("err = %v, se esperaba ErrNotFound", err)
 	}
+}
+
+// --- calificaciones en los listados (SEARCH-03) ---
+
+func avgp(v float64) *float64 { return &v }
+
+// checkRatings comprueba unas estadísticas de calificación (avg nil: sin
+// calificaciones).
+func checkRatings(t *testing.T, what string, got *domain.RatingStats, count int32, avg *float64) {
+	t.Helper()
+	if got == nil || got.Count != count || (avg == nil) != (got.Average == nil) || (avg != nil && *got.Average != *avg) {
+		t.Fatalf("%s: ratings = %+v, se esperaba {%d %v}", what, got, count, avg)
+	}
+}
+
+func TestSearchTraeCalificaciones(t *testing.T) {
+	f := newMusicFixture(false)
+	rated := localTrack("Grain", 1.0)
+	rated.RatingsCount, rated.AvgRating = 3, avgp(4.67)
+	unrated := localTrack("Grainy", 0.9)
+	f.catalog.tracks = []sqlc.SearchTracksTrigramRow{rated, unrated}
+	f.catalog.artists = []sqlc.SearchArtistsTrigramRow{{ID: uuid.New(), Name: "Hoke", Score: 1, RatingsCount: 2, AvgRating: avgp(4.5)}}
+	f.catalog.albums = []sqlc.SearchAlbumsTrigramRow{{ID: uuid.New(), Title: "BBO", Score: 1}}
+
+	res, err := f.svc.Search(context.Background(), "Grain", "track", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	tracks := res.Results.([]domain.Track)
+	checkRatings(t, "canción calificada", tracks[0].Ratings, 3, avgp(4.67))
+	checkRatings(t, "canción sin calificar", tracks[1].Ratings, 0, nil)
+
+	res, err = f.svc.Search(context.Background(), "Hoke", "artist", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	checkRatings(t, "artista", res.Results.([]domain.Artist)[0].Ratings, 2, avgp(4.5))
+
+	res, err = f.svc.Search(context.Background(), "BBO", "album", 0)
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	checkRatings(t, "álbum", res.Results.([]domain.Album)[0].Ratings, 0, nil)
+}
+
+func TestDiscografiaYPistasTraenCalificaciones(t *testing.T) {
+	f := newMusicFixture(false)
+	f.catalog.artist = &sqlc.GetArtistRow{ID: uuid.New(), Name: "Hoke"}
+	f.catalog.artistTracks = []sqlc.ListTracksByArtistRow{{ID: 1, RatingsCount: 1, AvgRating: avgp(5)}}
+	f.catalog.artistAlbums = []sqlc.ListAlbumsByArtistRow{{ID: uuid.New(), Title: "BBO", RatingsCount: 4, AvgRating: avgp(3.88)}}
+	f.catalog.album = &sqlc.GetAlbumRow{ID: uuid.New(), Title: "BBO", RatingsCount: 4, AvgRating: avgp(3.88)}
+	f.catalog.albumTracks = []sqlc.ListTracksByAlbumRow{{ID: 1, RatingsCount: 1, AvgRating: avgp(5)}, {ID: 2}}
+
+	tracks, err := f.svc.ArtistTracks(context.Background(), f.catalog.artist.ID.String(), 0)
+	if err != nil {
+		t.Fatalf("ArtistTracks: %v", err)
+	}
+	checkRatings(t, "canción del artista", tracks[0].Ratings, 1, avgp(5))
+
+	albums, err := f.svc.ArtistAlbums(context.Background(), f.catalog.artist.ID.String(), 0)
+	if err != nil {
+		t.Fatalf("ArtistAlbums: %v", err)
+	}
+	checkRatings(t, "álbum del artista", albums[0].Ratings, 4, avgp(3.88))
+
+	album, err := f.svc.GetAlbum(context.Background(), f.catalog.album.ID.String())
+	if err != nil {
+		t.Fatalf("GetAlbum: %v", err)
+	}
+	checkRatings(t, "álbum", album.Ratings, 4, avgp(3.88))
+	checkRatings(t, "pista calificada", album.Tracks[0].Ratings, 1, avgp(5))
+	checkRatings(t, "pista sin calificar", album.Tracks[1].Ratings, 0, nil)
+}
+
+func TestGetTrackTraeCalificaciones(t *testing.T) {
+	f := newMusicFixture(false)
+	f.catalog.track = &sqlc.GetTrackRow{ID: 7, RatingsCount: 2, AvgRating: avgp(4.25)}
+
+	got, err := f.svc.GetTrack(context.Background(), "7")
+	if err != nil {
+		t.Fatalf("GetTrack: %v", err)
+	}
+	checkRatings(t, "detalle", got.Ratings, 2, avgp(4.25))
 }

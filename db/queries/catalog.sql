@@ -31,6 +31,7 @@ SELECT
     (ar.enriched_at IS NOT NULL)::bool AS artist_enriched,
     coalesce(ar.enrich_attempts, 0)::int AS artist_enrich_attempts,
     s.album_id, s.link_attempts,
+    s.ratings_count, s.avg_rating,
     strict_word_similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, '')))::float8 AS score,
     (lower(f_unaccent(sqlc.arg(query)::text)) IN (
         lower(f_unaccent(coalesce(s.track_name, ''))),
@@ -54,6 +55,7 @@ LIMIT sqlc.arg(max_results);
 SELECT
     id, spotify_id, name, genres, popularity, image_url, created_at,
     (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts,
+    ratings_count, avg_rating,
     strict_word_similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(name))::float8 AS score
 FROM artists
 WHERE f_unaccent(sqlc.arg(query)::text) <<% f_unaccent(name)
@@ -63,7 +65,7 @@ LIMIT sqlc.arg(max_results);
 -- name: SearchAlbumsTrigram :many
 SELECT
     id, spotify_id, title, artist_id, artist_name, release_year, album_type,
-    image_url, total_tracks, created_at,
+    image_url, total_tracks, created_at, ratings_count, avg_rating,
     strict_word_similarity(f_unaccent(sqlc.arg(query)::text), f_unaccent(title || ' ' || artist_name))::float8 AS score
 FROM albums
 WHERE f_unaccent(sqlc.arg(query)::text) <<% f_unaccent(title || ' ' || artist_name)
@@ -118,7 +120,8 @@ SELECT
     s.id, s.track_id, s.track_name, s.artist_name, s.year, s.genre,
     s.popularity, s.duration_ms, s.pending_embedding,
     (s.embedding IS NOT NULL)::bool AS has_embedding,
-    ar.image_url AS artist_image_url
+    ar.image_url AS artist_image_url,
+    s.ratings_count, s.avg_rating
 FROM song_metadata s
 LEFT JOIN artists ar ON ar.id = s.artist_id
 WHERE s.album_id = $1
@@ -141,7 +144,8 @@ SELECT
     ar.spotify_id AS artist_spotify_id,
     (ar.enriched_at IS NOT NULL)::bool AS artist_enriched,
     coalesce(ar.enrich_attempts, 0)::int AS artist_enrich_attempts,
-    s.album_id, s.link_attempts
+    s.album_id, s.link_attempts,
+    s.ratings_count, s.avg_rating
 FROM song_metadata s
 LEFT JOIN albums al ON al.id = s.album_id
 LEFT JOIN artists ar ON ar.id = s.artist_id
@@ -153,7 +157,7 @@ LIMIT sqlc.arg(max_results);
 -- name: ListAlbumsByArtist :many
 SELECT
     id, spotify_id, title, artist_id, artist_name, release_year, album_type,
-    image_url, total_tracks, created_at
+    image_url, total_tracks, created_at, ratings_count, avg_rating
 FROM albums
 WHERE artist_id = sqlc.arg(artist_id)::uuid
 ORDER BY release_year DESC NULLS LAST, (album_type = 'album') DESC, title, id
@@ -256,7 +260,8 @@ ON CONFLICT (track_id) DO UPDATE SET
 RETURNING
     id, track_id, track_name, artist_name, year, genre, popularity, duration_ms,
     isrc, embedding_attempts, pending_embedding,
-    (embedding IS NOT NULL)::bool AS has_embedding;
+    (embedding IS NOT NULL)::bool AS has_embedding,
+    ratings_count, avg_rating;
 
 -- --- Enriquecimiento con Spotify (imágenes de artistas y enlace de canciones del CSV) ---
 

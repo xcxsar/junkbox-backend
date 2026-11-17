@@ -421,7 +421,7 @@ func (q *Queries) GetTrack(ctx context.Context, arg GetTrackParams) (GetTrackRow
 const listAlbumsByArtist = `-- name: ListAlbumsByArtist :many
 SELECT
     id, spotify_id, title, artist_id, artist_name, release_year, album_type,
-    image_url, total_tracks, created_at
+    image_url, total_tracks, created_at, ratings_count, avg_rating
 FROM albums
 WHERE artist_id = $1::uuid
 ORDER BY release_year DESC NULLS LAST, (album_type = 'album') DESC, title, id
@@ -434,16 +434,18 @@ type ListAlbumsByArtistParams struct {
 }
 
 type ListAlbumsByArtistRow struct {
-	ID          uuid.UUID      `json:"id"`
-	SpotifyID   sql.NullString `json:"spotify_id"`
-	Title       string         `json:"title"`
-	ArtistID    *uuid.UUID     `json:"artist_id"`
-	ArtistName  string         `json:"artist_name"`
-	ReleaseYear sql.NullInt32  `json:"release_year"`
-	AlbumType   string         `json:"album_type"`
-	ImageUrl    sql.NullString `json:"image_url"`
-	TotalTracks int32          `json:"total_tracks"`
-	CreatedAt   time.Time      `json:"created_at"`
+	ID           uuid.UUID      `json:"id"`
+	SpotifyID    sql.NullString `json:"spotify_id"`
+	Title        string         `json:"title"`
+	ArtistID     *uuid.UUID     `json:"artist_id"`
+	ArtistName   string         `json:"artist_name"`
+	ReleaseYear  sql.NullInt32  `json:"release_year"`
+	AlbumType    string         `json:"album_type"`
+	ImageUrl     sql.NullString `json:"image_url"`
+	TotalTracks  int32          `json:"total_tracks"`
+	CreatedAt    time.Time      `json:"created_at"`
+	RatingsCount int32          `json:"ratings_count"`
+	AvgRating    *float64       `json:"avg_rating"`
 }
 
 func (q *Queries) ListAlbumsByArtist(ctx context.Context, arg ListAlbumsByArtistParams) ([]ListAlbumsByArtistRow, error) {
@@ -466,6 +468,8 @@ func (q *Queries) ListAlbumsByArtist(ctx context.Context, arg ListAlbumsByArtist
 			&i.ImageUrl,
 			&i.TotalTracks,
 			&i.CreatedAt,
+			&i.RatingsCount,
+			&i.AvgRating,
 		); err != nil {
 			return nil, err
 		}
@@ -578,7 +582,8 @@ SELECT
     s.id, s.track_id, s.track_name, s.artist_name, s.year, s.genre,
     s.popularity, s.duration_ms, s.pending_embedding,
     (s.embedding IS NOT NULL)::bool AS has_embedding,
-    ar.image_url AS artist_image_url
+    ar.image_url AS artist_image_url,
+    s.ratings_count, s.avg_rating
 FROM song_metadata s
 LEFT JOIN artists ar ON ar.id = s.artist_id
 WHERE s.album_id = $1
@@ -597,6 +602,8 @@ type ListTracksByAlbumRow struct {
 	PendingEmbedding bool           `json:"pending_embedding"`
 	HasEmbedding     bool           `json:"has_embedding"`
 	ArtistImageUrl   sql.NullString `json:"artist_image_url"`
+	RatingsCount     int32          `json:"ratings_count"`
+	AvgRating        *float64       `json:"avg_rating"`
 }
 
 func (q *Queries) ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]ListTracksByAlbumRow, error) {
@@ -620,6 +627,8 @@ func (q *Queries) ListTracksByAlbum(ctx context.Context, albumID *uuid.UUID) ([]
 			&i.PendingEmbedding,
 			&i.HasEmbedding,
 			&i.ArtistImageUrl,
+			&i.RatingsCount,
+			&i.AvgRating,
 		); err != nil {
 			return nil, err
 		}
@@ -646,7 +655,8 @@ SELECT
     ar.spotify_id AS artist_spotify_id,
     (ar.enriched_at IS NOT NULL)::bool AS artist_enriched,
     coalesce(ar.enrich_attempts, 0)::int AS artist_enrich_attempts,
-    s.album_id, s.link_attempts
+    s.album_id, s.link_attempts,
+    s.ratings_count, s.avg_rating
 FROM song_metadata s
 LEFT JOIN albums al ON al.id = s.album_id
 LEFT JOIN artists ar ON ar.id = s.artist_id
@@ -680,6 +690,8 @@ type ListTracksByArtistRow struct {
 	ArtistEnrichAttempts int32          `json:"artist_enrich_attempts"`
 	AlbumID              *uuid.UUID     `json:"album_id"`
 	LinkAttempts         int32          `json:"link_attempts"`
+	RatingsCount         int32          `json:"ratings_count"`
+	AvgRating            *float64       `json:"avg_rating"`
 }
 
 // --- Discografía de un artista (SEARCH-02) ---
@@ -715,6 +727,8 @@ func (q *Queries) ListTracksByArtist(ctx context.Context, arg ListTracksByArtist
 			&i.ArtistEnrichAttempts,
 			&i.AlbumID,
 			&i.LinkAttempts,
+			&i.RatingsCount,
+			&i.AvgRating,
 		); err != nil {
 			return nil, err
 		}
@@ -824,7 +838,7 @@ func (q *Queries) MarkSongLinkFailed(ctx context.Context, arg MarkSongLinkFailed
 const searchAlbumsTrigram = `-- name: SearchAlbumsTrigram :many
 SELECT
     id, spotify_id, title, artist_id, artist_name, release_year, album_type,
-    image_url, total_tracks, created_at,
+    image_url, total_tracks, created_at, ratings_count, avg_rating,
     strict_word_similarity(f_unaccent($1::text), f_unaccent(title || ' ' || artist_name))::float8 AS score
 FROM albums
 WHERE f_unaccent($1::text) <<% f_unaccent(title || ' ' || artist_name)
@@ -838,17 +852,19 @@ type SearchAlbumsTrigramParams struct {
 }
 
 type SearchAlbumsTrigramRow struct {
-	ID          uuid.UUID      `json:"id"`
-	SpotifyID   sql.NullString `json:"spotify_id"`
-	Title       string         `json:"title"`
-	ArtistID    *uuid.UUID     `json:"artist_id"`
-	ArtistName  string         `json:"artist_name"`
-	ReleaseYear sql.NullInt32  `json:"release_year"`
-	AlbumType   string         `json:"album_type"`
-	ImageUrl    sql.NullString `json:"image_url"`
-	TotalTracks int32          `json:"total_tracks"`
-	CreatedAt   time.Time      `json:"created_at"`
-	Score       float64        `json:"score"`
+	ID           uuid.UUID      `json:"id"`
+	SpotifyID    sql.NullString `json:"spotify_id"`
+	Title        string         `json:"title"`
+	ArtistID     *uuid.UUID     `json:"artist_id"`
+	ArtistName   string         `json:"artist_name"`
+	ReleaseYear  sql.NullInt32  `json:"release_year"`
+	AlbumType    string         `json:"album_type"`
+	ImageUrl     sql.NullString `json:"image_url"`
+	TotalTracks  int32          `json:"total_tracks"`
+	CreatedAt    time.Time      `json:"created_at"`
+	RatingsCount int32          `json:"ratings_count"`
+	AvgRating    *float64       `json:"avg_rating"`
+	Score        float64        `json:"score"`
 }
 
 func (q *Queries) SearchAlbumsTrigram(ctx context.Context, arg SearchAlbumsTrigramParams) ([]SearchAlbumsTrigramRow, error) {
@@ -871,6 +887,8 @@ func (q *Queries) SearchAlbumsTrigram(ctx context.Context, arg SearchAlbumsTrigr
 			&i.ImageUrl,
 			&i.TotalTracks,
 			&i.CreatedAt,
+			&i.RatingsCount,
+			&i.AvgRating,
 			&i.Score,
 		); err != nil {
 			return nil, err
@@ -891,6 +909,7 @@ const searchArtistsTrigram = `-- name: SearchArtistsTrigram :many
 SELECT
     id, spotify_id, name, genres, popularity, image_url, created_at,
     (enriched_at IS NOT NULL)::bool AS enriched, enrich_attempts,
+    ratings_count, avg_rating,
     strict_word_similarity(f_unaccent($1::text), f_unaccent(name))::float8 AS score
 FROM artists
 WHERE f_unaccent($1::text) <<% f_unaccent(name)
@@ -913,6 +932,8 @@ type SearchArtistsTrigramRow struct {
 	CreatedAt      time.Time      `json:"created_at"`
 	Enriched       bool           `json:"enriched"`
 	EnrichAttempts int32          `json:"enrich_attempts"`
+	RatingsCount   int32          `json:"ratings_count"`
+	AvgRating      *float64       `json:"avg_rating"`
 	Score          float64        `json:"score"`
 }
 
@@ -938,6 +959,8 @@ func (q *Queries) SearchArtistsTrigram(ctx context.Context, arg SearchArtistsTri
 			&i.CreatedAt,
 			&i.Enriched,
 			&i.EnrichAttempts,
+			&i.RatingsCount,
+			&i.AvgRating,
 			&i.Score,
 		); err != nil {
 			return nil, err
@@ -967,6 +990,7 @@ SELECT
     (ar.enriched_at IS NOT NULL)::bool AS artist_enriched,
     coalesce(ar.enrich_attempts, 0)::int AS artist_enrich_attempts,
     s.album_id, s.link_attempts,
+    s.ratings_count, s.avg_rating,
     strict_word_similarity(f_unaccent($1::text), f_unaccent(coalesce(s.track_name, '') || ' ' || coalesce(s.artist_name, '')))::float8 AS score,
     (lower(f_unaccent($1::text)) IN (
         lower(f_unaccent(coalesce(s.track_name, ''))),
@@ -1007,6 +1031,8 @@ type SearchTracksTrigramRow struct {
 	ArtistEnrichAttempts int32          `json:"artist_enrich_attempts"`
 	AlbumID              *uuid.UUID     `json:"album_id"`
 	LinkAttempts         int32          `json:"link_attempts"`
+	RatingsCount         int32          `json:"ratings_count"`
+	AvgRating            *float64       `json:"avg_rating"`
 	Score                float64        `json:"score"`
 	Exact                bool           `json:"exact"`
 }
@@ -1058,6 +1084,8 @@ func (q *Queries) SearchTracksTrigram(ctx context.Context, arg SearchTracksTrigr
 			&i.ArtistEnrichAttempts,
 			&i.AlbumID,
 			&i.LinkAttempts,
+			&i.RatingsCount,
+			&i.AvgRating,
 			&i.Score,
 			&i.Exact,
 		); err != nil {
@@ -1286,7 +1314,8 @@ ON CONFLICT (track_id) DO UPDATE SET
 RETURNING
     id, track_id, track_name, artist_name, year, genre, popularity, duration_ms,
     isrc, embedding_attempts, pending_embedding,
-    (embedding IS NOT NULL)::bool AS has_embedding
+    (embedding IS NOT NULL)::bool AS has_embedding,
+    ratings_count, avg_rating
 `
 
 type UpsertSongFromSpotifyParams struct {
@@ -1316,6 +1345,8 @@ type UpsertSongFromSpotifyRow struct {
 	EmbeddingAttempts int32          `json:"embedding_attempts"`
 	PendingEmbedding  bool           `json:"pending_embedding"`
 	HasEmbedding      bool           `json:"has_embedding"`
+	RatingsCount      int32          `json:"ratings_count"`
+	AvgRating         *float64       `json:"avg_rating"`
 }
 
 // Una canción del CSV que ya tiene embedding conserva sus datos históricos;
@@ -1349,6 +1380,8 @@ func (q *Queries) UpsertSongFromSpotify(ctx context.Context, arg UpsertSongFromS
 		&i.EmbeddingAttempts,
 		&i.PendingEmbedding,
 		&i.HasEmbedding,
+		&i.RatingsCount,
+		&i.AvgRating,
 	)
 	return i, err
 }

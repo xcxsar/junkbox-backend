@@ -39,23 +39,26 @@ type SearchResult struct {
 	Results any    `json:"results"`
 }
 
-// Track es una canción en listados (búsqueda y pistas de un álbum).
-// AlbumImageURL es la portada y ArtistImageURL la foto del artista
-// principal; son nil si aún no se conocen.
+// Track es una canción en listados (búsqueda, discografía, pistas de un
+// álbum, Inicio) y en el detalle. AlbumImageURL es la portada y
+// ArtistImageURL la foto del artista principal; son nil si aún no se
+// conocen. Ratings va en el detalle y en los listados; el resumen de una
+// reseña (target.summary) sale sin él.
 type Track struct {
-	ID               int32   `json:"id"`
-	SpotifyID        string  `json:"spotify_id"`
-	TrackName        string  `json:"track_name"`
-	ArtistName       string  `json:"artist_name"`
-	AlbumTitle       *string `json:"album_title,omitempty"`
-	AlbumImageURL    *string `json:"album_image_url"`
-	ArtistImageURL   *string `json:"artist_image_url"`
-	Year             *int32  `json:"year"`
-	Genre            *string `json:"genre"`
-	Popularity       *int32  `json:"popularity"`
-	DurationMs       *int32  `json:"duration_ms"`
-	HasEmbedding     bool    `json:"has_embedding"`
-	PendingEmbedding bool    `json:"pending_embedding"`
+	ID               int32        `json:"id"`
+	SpotifyID        string       `json:"spotify_id"`
+	TrackName        string       `json:"track_name"`
+	ArtistName       string       `json:"artist_name"`
+	AlbumTitle       *string      `json:"album_title,omitempty"`
+	AlbumImageURL    *string      `json:"album_image_url"`
+	ArtistImageURL   *string      `json:"artist_image_url"`
+	Year             *int32       `json:"year"`
+	Genre            *string      `json:"genre"`
+	Popularity       *int32       `json:"popularity"`
+	DurationMs       *int32       `json:"duration_ms"`
+	HasEmbedding     bool         `json:"has_embedding"`
+	PendingEmbedding bool         `json:"pending_embedding"`
+	Ratings          *RatingStats `json:"ratings,omitempty"`
 }
 
 // TrackDetail es la respuesta de GET /music/tracks/{id}.
@@ -65,7 +68,6 @@ type TrackDetail struct {
 	AlbumID       *uuid.UUID     `json:"album_id"`
 	ISRC          *string        `json:"isrc"`
 	AudioFeatures *AudioFeatures `json:"audio_features"`
-	Ratings       RatingStats    `json:"ratings"`
 }
 
 // AudioFeatures son los atributos acústicos de una canción. Los campos nil
@@ -85,7 +87,8 @@ type AudioFeatures struct {
 	TimeSignature    *int32   `json:"time_signature"`
 }
 
-// Artist es un artista del catálogo. Ratings solo se llena en el detalle.
+// Artist es un artista del catálogo. Ratings se llena en el detalle y en
+// los listados (no en target.summary).
 type Artist struct {
 	ID         uuid.UUID    `json:"id"`
 	SpotifyID  *string      `json:"spotify_id"`
@@ -97,8 +100,8 @@ type Artist struct {
 	Ratings    *RatingStats `json:"ratings,omitempty"`
 }
 
-// Album es un álbum del catálogo. Tracks y Ratings solo se llenan en el
-// detalle.
+// Album es un álbum del catálogo. Tracks solo se llena en el detalle;
+// Ratings, en el detalle y en los listados (no en target.summary).
 type Album struct {
 	ID          uuid.UUID    `json:"id"`
 	SpotifyID   *string      `json:"spotify_id"`

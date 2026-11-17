@@ -49,6 +49,7 @@ func (s *MusicService) ArtistAlbums(ctx context.Context, id string, limit int) (
 	out := make([]domain.Album, len(rows))
 	for i, r := range rows {
 		out[i] = albumFromRow(sqlc.GetAlbumRow{ID: r.ID, SpotifyID: r.SpotifyID, Title: r.Title, ArtistID: r.ArtistID, ArtistName: r.ArtistName, ReleaseYear: r.ReleaseYear, AlbumType: r.AlbumType, ImageUrl: r.ImageUrl, TotalTracks: r.TotalTracks, CreatedAt: r.CreatedAt})
+		out[i].Ratings = ratingStats(r.RatingsCount, r.AvgRating)
 	}
 	return out, nil
 }
@@ -99,7 +100,7 @@ func (s *MusicService) listArtistTracks(ctx context.Context, artistID uuid.UUID,
 			Popularity: r.Popularity, DurationMs: r.DurationMs, PendingEmbedding: r.PendingEmbedding, HasEmbedding: r.HasEmbedding,
 			AlbumTitle: r.AlbumTitle, AlbumImageUrl: r.AlbumImageUrl, ArtistImageUrl: r.ArtistImageUrl,
 			ArtistSpotifyID: r.ArtistSpotifyID, ArtistEnriched: r.ArtistEnriched, ArtistEnrichAttempts: r.ArtistEnrichAttempts,
-			AlbumID: r.AlbumID, LinkAttempts: r.LinkAttempts,
+			AlbumID: r.AlbumID, LinkAttempts: r.LinkAttempts, RatingsCount: r.RatingsCount, AvgRating: r.AvgRating,
 		}
 	}
 	return out, nil

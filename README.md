@@ -249,10 +249,12 @@ Para reconstruirlo en cualquier entorno limpio, sin copiar volúmenes Docker a m
   make vet
   ```
 
-- **Ejecutar pruebas unitarias y de integración:**
+- **Ejecutar pruebas:**
   ```bash
-  make test
+  make test      # sin base de datos: las pruebas de integración se omiten
+  make test-db   # además, las de integración contra la base de .env
   ```
+  Las pruebas de integración (`TEST_DATABASE_URL`) necesitan las migraciones aplicadas. Crean filas con IDs de prueba y las borran al terminar.
 
 - **Compilar binarios:**
   ```bash
@@ -621,6 +623,8 @@ La búsqueda ignora tildes en los tres tipos ("Zoe" encuentra a Zoé, "Beyonce" 
 
 Si Spotify falla o no está configurado, responde los resultados locales que haya.
 
+Cada resultado (canción, artista o álbum) trae `ratings: { count, average }` con las calificaciones de JunkBox. `average` es `null` si nadie lo ha calificado. Lo mismo aplica a los listados de la discografía (13.1 y 13.2), a las pistas del álbum (14) y a las canciones de Inicio (23). Los resúmenes de las reseñas (`target.summary`) no lo traen.
+
 Cada canción trae `album_image_url` (portada) y `artist_image_url`, y cada artista su `image_url`. Si faltan en el catálogo, la búsqueda las pide a Spotify antes de responder, en paralelo y con un tope de `SEARCH_ENRICH_BUDGET` (2 s):
 - los artistas que llegaron "simplificados" (sin imagen) se completan con `GET /v1/artists/{id}`;
 - las canciones del CSV, que no tienen álbum, se enlazan con `GET /v1/tracks/{id}`. Eso trae la portada y reclama a su artista.
@@ -661,7 +665,8 @@ curl -i -X GET "http://localhost:8080/api/v1/music/search?q=Grain%20Dan%20Telfer
       "popularity": 5,
       "duration_ms": 352307,
       "has_embedding": true,
-      "pending_embedding": false
+      "pending_embedding": false,
+      "ratings": { "count": 0, "average": null }
     }
   ]
 }
@@ -696,7 +701,8 @@ curl -i -X GET "http://localhost:8080/api/v1/music/search?q=Espresso%20Sabrina%2
       "popularity": null,
       "duration_ms": 175459,
       "has_embedding": false,
-      "pending_embedding": true
+      "pending_embedding": true,
+      "ratings": { "count": 0, "average": null }
     }
   ]
 }
@@ -798,7 +804,7 @@ Devuelve los álbumes y sencillos del artista, del más reciente al más antiguo
 
 La primera vez, y después una vez por semana, se piden a Spotify (`GET /v1/artists/{id}/albums`, sin recopilaciones ni apariciones, hasta 50) antes de responder. Si Spotify falla, se responden los que ya hay.
 
-**Respuesta (`200 OK`):** `{"count": n, "results": [Album…]}`. Cada álbum es como en el detalle, sin `tracks` ni `ratings`. `404` si el artista no existe.
+**Respuesta (`200 OK`):** `{"count": n, "results": [Album…]}`. Cada álbum es como en el detalle (con `ratings`), sin `tracks`. `404` si el artista no existe.
 
 ---
 
@@ -836,7 +842,8 @@ curl -i -X GET "http://localhost:8080/api/v1/music/albums/2lIZef49vdWi0LMePaA4Sp
       "popularity": null,
       "duration_ms": 175459,
       "has_embedding": true,
-      "pending_embedding": false
+      "pending_embedding": false,
+      "ratings": { "count": 0, "average": null }
     }
   ]
 }
@@ -1127,7 +1134,8 @@ curl -s "http://localhost:8080/api/v1/home?limit=8" \
           "popularity": 23,
           "duration_ms": 218040,
           "has_embedding": true,
-          "pending_embedding": false
+          "pending_embedding": false,
+          "ratings": { "count": 0, "average": null }
         }
       ]
     }

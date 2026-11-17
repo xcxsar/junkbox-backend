@@ -239,3 +239,18 @@ func TestHomeCompletaImagenesComoLaBusqueda(t *testing.T) {
 		t.Fatalf("nada debía quedar pendiente: %v", f.fallback.jobs)
 	}
 }
+
+func TestHomeTraeCalificaciones(t *testing.T) {
+	rated := similarRow(7, "pop")
+	rated.RatingsCount, rated.AvgRating = 5, avgp(4.6)
+	store := &fakeRecommendationStore{
+		popular: []sqlc.ListPopularTracksRow{sqlc.ListPopularTracksRow(rated), sqlc.ListPopularTracksRow(similarRow(8, "pop"))},
+	}
+	feed, err := NewRecommendationService(store, SearchEnrichment{}).Home(context.Background(), uuid.New(), 0)
+	if err != nil {
+		t.Fatalf("Home: %v", err)
+	}
+	items := feed.Sections[0].Items
+	checkRatings(t, "ítem calificado", items[0].Ratings, 5, avgp(4.6))
+	checkRatings(t, "ítem sin calificar", items[1].Ratings, 0, nil)
+}

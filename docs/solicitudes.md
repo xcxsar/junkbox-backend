@@ -757,3 +757,56 @@ Con eso:
   - "Aztlán" de Zoé: de 1 a 12 pistas (≈0,2 s).
   - The Weeknd: 5 canciones del dataset por popularidad, con portada y sin consultar Spotify. Sus álbumes salen desde "Hurry Up Tomorrow" (2025).
   - Artista inexistente → 404; `limit=0` o `51` → 400.
+
+---
+
+### SEARCH-03 · Calificación en los resultados
+
+- **Estado:** Resuelta · **Fecha:** 2026-11-17
+- **Responsable:** Backend
+
+#### Qué se pidió
+
+Figma muestra "★ 4,6" en cada canción, álbum y artista, pero los resultados de búsqueda no traían `ratings` (solo el detalle). Se pidió añadir `ratings: { count, average | null }` a cada elemento de `results`.
+
+#### Decisión
+
+Se añade en **todos los listados**, no solo en la búsqueda, para que cualquier tarjeta pueda mostrar la estrella con el mismo objeto. Las estadísticas ya existían en el catálogo (`ratings_count` y `avg_rating` en canciones, álbumes y artistas, actualizadas por el trigger de calificaciones), así que solo se leen dos columnas más de la misma fila, sin consultas extra.
+
+- Siempre llega el objeto. `average` es `null` si nadie ha calificado el elemento, con la misma forma que el detalle.
+- Las canciones que llegan del respaldo de Spotify o al completar álbumes también lo traen (`{0, null}` si son nuevas).
+- Los resúmenes de reseñas (`target.summary`) siguen **sin** `ratings`, como se decidió en HOME-02.
+
+#### Contrato de la API
+
+Cada elemento lleva:
+
+```json
+"ratings": { "count": 3, "average": 4.67 }
+```
+
+| Endpoint | Elementos con `ratings` |
+| --- | --- |
+| `GET /music/search?type=track|artist|album` | cada canción, artista o álbum de `results` |
+| `GET /music/artists/{id}/tracks` y `/albums` (SEARCH-02) | cada elemento de `results` |
+| `GET /music/albums/{id}` | el álbum (ya lo tenía) y cada pista de `tracks[]` |
+| `GET /home` | cada canción de `sections[].items` |
+| `GET /music/tracks/{id}`, `/artists/{id}` | sin cambios (ya lo tenían) |
+| `target.summary` de las reseñas | no lo trae |
+
+Es un cambio aditivo: ningún campo cambia de nombre ni de tipo.
+
+#### Qué tiene que hacer el frontend
+
+1. Mostrar la estrella con `ratings.average` en filas y tarjetas, y ocultarla cuando sea `null`.
+2. Quitar la petición al detalle que hacía el álbum destacado solo para obtener la calificación.
+
+#### Pendiente / fuera de alcance
+
+- Nada.
+
+#### Verificación
+
+- `go test ./...`: `TestSearchTraeCalificaciones` (los tres tipos, con y sin calificaciones), `TestDiscografiaYPistasTraenCalificaciones`, `TestGetTrackTraeCalificaciones`, `TestHomeTraeCalificaciones` y `TestSummarizeTargetCancionCompletaCaratula`, que ahora comprueba que el resumen sale sin `ratings`.
+- Integración (`make test-db`): `TestImportTraeLasCalificacionesExistentes` (`internal/adapters/secondary/postgres/catalog_importer_test.go`). Importa una canción, la califica junto con su álbum y su artista, la vuelve a importar y comprueba que `ImportTracks`, `ImportAlbums` e `ImportArtists` devuelven esas calificaciones, que es el camino del respaldo de Spotify y de completar álbumes. Sin la lectura de `ratings_count`/`avg_rating` en el importador, la prueba falla.
+- Prueba manual contra el servidor local con un usuario temporal que calificó "Olympique" (4,5), el álbum "BBO" (4) y al artista Hoke (5): las tres aparecen con sus `ratings` en la búsqueda, la discografía, el detalle del álbum y sus pistas; los elementos sin calificar salen con `{"count": 0, "average": null}` (también en `/home`); y el `target.summary` de una reseña salió sin `ratings`. Las calificaciones, la reseña y el usuario de prueba se borraron, y las estadísticas volvieron a 0.

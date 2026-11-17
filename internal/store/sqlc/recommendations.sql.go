@@ -90,7 +90,8 @@ SELECT
     ar.spotify_id AS artist_spotify_id,
     (ar.enriched_at IS NOT NULL)::bool AS artist_enriched,
     coalesce(ar.enrich_attempts, 0)::int AS artist_enrich_attempts,
-    s.album_id, s.link_attempts
+    s.album_id, s.link_attempts,
+    s.ratings_count, s.avg_rating
 FROM unique_songs u
 JOIN song_metadata s ON s.id = u.id
 LEFT JOIN albums al ON al.id = s.album_id
@@ -123,6 +124,8 @@ type ListPopularTracksRow struct {
 	ArtistEnrichAttempts int32          `json:"artist_enrich_attempts"`
 	AlbumID              *uuid.UUID     `json:"album_id"`
 	LinkAttempts         int32          `json:"link_attempts"`
+	RatingsCount         int32          `json:"ratings_count"`
+	AvgRating            *float64       `json:"avg_rating"`
 }
 
 // ListPopularTracks es el respaldo cuando el usuario no tiene semilla: las
@@ -158,6 +161,8 @@ func (q *Queries) ListPopularTracks(ctx context.Context, arg ListPopularTracksPa
 			&i.ArtistEnrichAttempts,
 			&i.AlbumID,
 			&i.LinkAttempts,
+			&i.RatingsCount,
+			&i.AvgRating,
 		); err != nil {
 			return nil, err
 		}
@@ -196,7 +201,8 @@ SELECT
     ar.spotify_id AS artist_spotify_id,
     (ar.enriched_at IS NOT NULL)::bool AS artist_enriched,
     coalesce(ar.enrich_attempts, 0)::int AS artist_enrich_attempts,
-    s.album_id, s.link_attempts
+    s.album_id, s.link_attempts,
+    s.ratings_count, s.avg_rating
 FROM nearest
 JOIN song_metadata s ON s.id = nearest.id
 LEFT JOIN albums al ON al.id = s.album_id
@@ -233,6 +239,8 @@ type RecommendSimilarTracksRow struct {
 	ArtistEnrichAttempts int32          `json:"artist_enrich_attempts"`
 	AlbumID              *uuid.UUID     `json:"album_id"`
 	LinkAttempts         int32          `json:"link_attempts"`
+	RatingsCount         int32          `json:"ratings_count"`
+	AvgRating            *float64       `json:"avg_rating"`
 }
 
 // RecommendSimilarTracks excluye la semilla, sus duplicados (mismo título y
@@ -279,6 +287,8 @@ func (q *Queries) RecommendSimilarTracks(ctx context.Context, arg RecommendSimil
 			&i.ArtistEnrichAttempts,
 			&i.AlbumID,
 			&i.LinkAttempts,
+			&i.RatingsCount,
+			&i.AvgRating,
 		); err != nil {
 			return nil, err
 		}

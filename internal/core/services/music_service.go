@@ -182,6 +182,7 @@ func (s *MusicService) searchLocal(ctx context.Context, query, searchType string
 		var jobs []domain.EnrichmentJob
 		for i, r := range rows {
 			out[i] = artistFromRow(sqlc.GetArtistRow{ID: r.ID, SpotifyID: r.SpotifyID, Name: r.Name, Genres: r.Genres, Popularity: r.Popularity, ImageUrl: r.ImageUrl, CreatedAt: r.CreatedAt})
+			out[i].Ratings = ratingStats(r.RatingsCount, r.AvgRating)
 			if !r.ImageUrl.Valid && artistEnrichable(r.SpotifyID.String, r.Enriched, r.EnrichAttempts) {
 				jobs = append(jobs, domain.EnrichmentJob{Kind: domain.EnrichArtist, SpotifyID: r.SpotifyID.String})
 			}
@@ -195,6 +196,7 @@ func (s *MusicService) searchLocal(ctx context.Context, query, searchType string
 		out := make([]domain.Album, len(rows))
 		for i, r := range rows {
 			out[i] = albumFromRow(sqlc.GetAlbumRow{ID: r.ID, SpotifyID: r.SpotifyID, Title: r.Title, ArtistID: r.ArtistID, ArtistName: r.ArtistName, ReleaseYear: r.ReleaseYear, AlbumType: r.AlbumType, ImageUrl: r.ImageUrl, TotalTracks: r.TotalTracks, CreatedAt: r.CreatedAt})
+			out[i].Ratings = ratingStats(r.RatingsCount, r.AvgRating)
 		}
 		return localResults{results: out, count: len(out), best: bestScore(len(rows), func(i int) float64 { return rows[i].Score })}, nil
 	default:
@@ -231,6 +233,7 @@ func trackResults(rows []sqlc.SearchTracksTrigramRow) localResults {
 			DurationMs:       int32Ptr(r.DurationMs),
 			HasEmbedding:     r.HasEmbedding,
 			PendingEmbedding: r.PendingEmbedding,
+			Ratings:          ratingStats(r.RatingsCount, r.AvgRating),
 		}
 		artists[i] = r.ArtistSpotifyID.String
 		jobs = append(jobs, trackEnrichmentState{
@@ -391,8 +394,8 @@ func trackDetailFromRow(r sqlc.GetTrackRow) *domain.TrackDetail {
 		ArtistID: r.ArtistID,
 		AlbumID:  r.AlbumID,
 		ISRC:     stringPtr(r.Isrc),
-		Ratings:  domain.RatingStats{Count: r.RatingsCount, Average: r.AvgRating},
 	}
+	detail.Ratings = ratingStats(r.RatingsCount, r.AvgRating)
 	features := domain.AudioFeatures{
 		Danceability:     float64Ptr(r.Danceability),
 		Energy:           float64Ptr(r.Energy),
@@ -429,7 +432,7 @@ func (s *MusicService) artist(ctx context.Context, arg sqlc.GetArtistParams) (*d
 		return nil, notFoundOr(err, "music: obtener artista")
 	}
 	artist := artistFromRow(r)
-	artist.Ratings = &domain.RatingStats{Count: r.RatingsCount, Average: r.AvgRating}
+	artist.Ratings = ratingStats(r.RatingsCount, r.AvgRating)
 	if !r.ImageUrl.Valid && artistEnrichable(r.SpotifyID.String, r.Enriched, r.EnrichAttempts) {
 		job := domain.EnrichmentJob{Kind: domain.EnrichArtist, SpotifyID: r.SpotifyID.String}
 		if got, ok := resolveEnrichment(ctx, s.enrich, []domain.EnrichmentJob{job}); ok {
@@ -450,6 +453,7 @@ func (s *MusicService) SummarizeTarget(ctx context.Context, target domain.Target
 		if err != nil {
 			return nil, err
 		}
+		detail.Track.Ratings = nil
 		return &detail.Track, nil
 	case domain.TargetAlbum:
 		r, err := s.catalog.GetAlbum(ctx, sqlc.GetAlbumParams{ID: target.AlbumID})
@@ -483,7 +487,7 @@ func (s *MusicService) GetAlbum(ctx context.Context, id string) (*domain.Album, 
 		return nil, notFoundOr(err, "music: obtener álbum")
 	}
 	album := albumFromRow(r)
-	album.Ratings = &domain.RatingStats{Count: r.RatingsCount, Average: r.AvgRating}
+	album.Ratings = ratingStats(r.RatingsCount, r.AvgRating)
 
 	rows, err := s.catalog.ListTracksByAlbum(ctx, &album.ID)
 	if err != nil {
@@ -510,6 +514,7 @@ func (s *MusicService) GetAlbum(ctx context.Context, id string) (*domain.Album, 
 			DurationMs:       int32Ptr(t.DurationMs),
 			HasEmbedding:     t.HasEmbedding,
 			PendingEmbedding: t.PendingEmbedding,
+			Ratings:          ratingStats(t.RatingsCount, t.AvgRating),
 		}
 	}
 	return &album, nil
@@ -585,6 +590,12 @@ func notFoundOr(err error, op string) error {
 		return domain.ErrNotFound
 	}
 	return fmt.Errorf("%s: %w", op, err)
+}
+
+// ratingStats arma las estadísticas de calificación de un objetivo
+// (average es nil si nadie lo ha calificado).
+func ratingStats(count int32, avg *float64) *domain.RatingStats {
+	return &domain.RatingStats{Count: count, Average: avg}
 }
 
 func bestScore(n int, score func(int) float64) float64 {

@@ -130,6 +130,7 @@ func (s *RecommendationService) items(ctx context.Context, rows []sqlc.ListPopul
 			DurationMs:       int32Ptr(r.DurationMs),
 			HasEmbedding:     r.HasEmbedding,
 			PendingEmbedding: r.PendingEmbedding,
+			Ratings:          ratingStats(r.RatingsCount, r.AvgRating),
 		}
 		artists[i] = r.ArtistSpotifyID.String
 		jobs = append(jobs, trackEnrichmentState{
